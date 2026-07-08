@@ -347,12 +347,12 @@ void gui_demo_thread(void* arg) {
             // Apply velocity-sensitive mouse acceleration curve (integer-only approximation)
             int speed = (m_dx < 0 ? -m_dx : m_dx) + (m_dy < 0 ? -m_dy : m_dy);
             int scale_num = 10;
-            if (speed < 3) {
-                scale_num = 6;  // 0.6x speed for sub-pixel precision
-            } else if (speed > 12) {
-                scale_num = 22; // 2.2x speed for rapid sweeps
+            if (speed < 4) {
+                scale_num = 4;  // 0.4x speed for fine target precision
+            } else if (speed > 16) {
+                scale_num = 14; // 1.4x speed for fast sweeps (prevents jumps)
             } else {
-                scale_num = 6 + (speed - 3) * 16 / 9; // linear interpolation
+                scale_num = 4 + (speed - 4) / 2; // linear interpolation
             }
             m_dx = (m_dx * scale_num) / 10;
             m_dy = (m_dy * scale_num) / 10;
