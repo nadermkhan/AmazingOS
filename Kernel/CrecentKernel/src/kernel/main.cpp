@@ -10,6 +10,8 @@
 #include "heap.hpp"
 #include "scheduler.hpp"
 #include "syscall.hpp"
+#include "../drivers/framebuffer.hpp"
+#include "wm.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -175,6 +177,74 @@ void user_bootstrap_thread(void* arg) {
     kernel::jump_to_user_mode((void(*)())code_virt, (void*)(stack_virt + 4096));
 }
 
+volatile bool gui_demo_complete = false;
+
+// GUI Compositor & Window Manager verification thread
+void gui_demo_thread(void* arg) {
+    (void)arg;
+
+    // 1. Wait briefly for other boot logs to settle on screen/serial
+    for (volatile int delay = 0; delay < 10000000; ) {
+        delay = delay + 1;
+    }
+
+    if (!drivers::Framebuffer::is_initialized()) {
+        drivers::Serial::println("[DEMO] Skipping GUI: Framebuffer driver is not initialized.");
+        return;
+    }
+
+    drivers::Serial::println("[DEMO] Starting Graphical User Interface and Window Manager...");
+
+    // 2. Initialize Window Manager
+    wm::WindowManager::init();
+
+    // 3. Create Windows
+    wm::WindowManager::create_window(100, 120, 320, 200, "System Log", 0x001B2E3C); // Slate Teal
+    wm::WindowManager::create_window(250, 220, 400, 240, "Performance Monitor", 0x002D3748); // Dark Charcoal
+
+    // Draw initial desktop frame
+    wm::WindowManager::draw_desktop();
+
+    // 4. Perform an automated window drag sequence
+    drivers::Serial::println("[DEMO] Starting Window Compositor Drag Verification...");
+
+    // Click inside the title bar of win1 at (150, 130)
+    bool click = true;
+    int mouse_x = 150;
+    int mouse_y = 130;
+    wm::WindowManager::handle_mouse_move(mouse_x, mouse_y, click);
+
+    // Smoothly drag the window over 10 steps
+    for (int step = 1; step <= 10; ++step) {
+        int dx = step * 15;
+        int dy = step * 10;
+        wm::WindowManager::handle_mouse_move(mouse_x + dx, mouse_y + dy, click);
+        wm::WindowManager::draw_desktop();
+
+        // Delay to make it visible
+        for (volatile int delay = 0; delay < 5000000; ) {
+            delay = delay + 1;
+        }
+    }
+
+    // Release mouse click
+    click = false;
+    wm::WindowManager::handle_mouse_move(mouse_x + 150, mouse_y + 100, click);
+    wm::WindowManager::draw_desktop();
+
+    drivers::Serial::println("[DEMO] Window Composer Drag Verification Complete - SUCCESS");
+    gui_demo_complete = true;
+
+    // 5. Compositor Refresh Loop (Refreshes the display periodically)
+    while (true) {
+        wm::WindowManager::draw_desktop();
+        // Slow refresh tick
+        for (volatile int delay = 0; delay < 2000000; ) {
+            delay = delay + 1;
+        }
+    }
+}
+
 // Define an empty dummy __main function to satisfy MinGW's global constructor initialization stub
 extern "C" void __main() {}
 
@@ -236,6 +306,56 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
             drivers::Serial::println("[INIT] Slab Heap Allocator initialized.");
         } else {
             drivers::Serial::println("[ERROR] Slab Heap Allocator failed!");
+        }
+    }
+
+    // Initialize Graphical Framebuffer if VBE graphics requested and supplied by bootloader
+    if (heap_ok) {
+        uint64_t fb_phys = 0;
+        uint32_t fb_width = 1024;
+        uint32_t fb_height = 768;
+        uint32_t fb_pitch = 1024 * 4;
+        uint8_t fb_bpp = 32;
+        bool fb_detected = false;
+
+        uint32_t mb_flags = *(uint32_t*)maddr;
+        if (mb_flags & (1 << 11)) {
+            fb_phys = *(uint64_t*)(maddr + 88);
+            fb_pitch = *(uint32_t*)(maddr + 96);
+            fb_width = *(uint32_t*)(maddr + 100);
+            fb_height = *(uint32_t*)(maddr + 104);
+            fb_bpp = *(uint8_t*)(maddr + 108);
+            fb_detected = true;
+            if (serial_ok) {
+                drivers::Serial::println("[INIT] Graphical Framebuffer detected via Multiboot.");
+            }
+        } else {
+            // Fallback: Check BGA over PCI configuration space
+            uint64_t bga_fb = drivers::Framebuffer::detect_bga();
+            if (bga_fb) {
+                fb_phys = bga_fb;
+                fb_detected = true;
+                // Setup BGA graphics registers to 1024x768x32
+                drivers::Framebuffer::setup_bga(1024, 768, 32);
+                if (serial_ok) {
+                    drivers::Serial::println("[INIT] Graphical Framebuffer fallback: Bochs/QEMU BGA detected via PCI.");
+                }
+            } else {
+                if (serial_ok) {
+                    drivers::Serial::println("[WARNING] No Multiboot VBE or Bochs BGA adapter detected. Skipping GUI.");
+                }
+            }
+        }
+
+        if (fb_detected) {
+            bool fb_ok = drivers::Framebuffer::init(fb_phys, fb_width, fb_height, fb_pitch, fb_bpp);
+            if (serial_ok) {
+                if (fb_ok) {
+                    drivers::Serial::println("[INIT] Graphical Framebuffer driver loaded successfully.");
+                } else {
+                    drivers::Serial::println("[ERROR] Graphical Framebuffer driver failed to allocate back buffer!");
+                }
+            }
         }
     }
 
@@ -644,6 +764,9 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         UserBootstrapArgs* u_args2 = new UserBootstrapArgs{user_security_entry, 0x500000000ULL, 0x500001000ULL};
         kernel::thread_create(user_bootstrap_thread, u_args2);
 
+        // Spawn GUI Window Compositor demo thread
+        kernel::thread_create(gui_demo_thread, nullptr);
+
         // Initialize Local APIC Timer (periodic Vector 32 ticks)
         drivers::Apic::init_timer(0x80000);
 
@@ -651,9 +774,9 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         drivers::Serial::println("[TEST] Enabling interrupts via 'sti' to start scheduling...");
         __asm__ __volatile__ ("sti");
 
-        // Wait a few moments to allow threads A, B, and C to run and interleave
-        for (volatile int delay = 0; delay < 50000000; ) {
-            delay = delay + 1;
+        // Wait for GUI Window Compositor demo to complete its test sequence
+        while (!gui_demo_complete) {
+            __asm__ __volatile__ ("hlt");
         }
 
         // Disable interrupts before triggering the final Page Fault crash

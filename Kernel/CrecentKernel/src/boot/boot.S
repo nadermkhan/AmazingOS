@@ -1,6 +1,6 @@
 # Declare constants for Multiboot headers
 .set MULTIBOOT1_MAGIC,     0x1BADB002
-.set MULTIBOOT1_FLAGS,     0x00000003  # ALIGN + MEMINFO
+.set MULTIBOOT1_FLAGS,     0x00000007  # ALIGN + MEMINFO + GRAPHICS
 .set MULTIBOOT1_CHECKSUM,  -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
 
 .set MULTIBOOT2_MAGIC,     0xe85250d6
@@ -16,6 +16,17 @@ multiboot1_start:
     .long MULTIBOOT1_MAGIC
     .long MULTIBOOT1_FLAGS
     .long MULTIBOOT1_CHECKSUM
+    # Address fields (must be present if flag 2 or 16 is set, set to 0 as ELF loader handles execution)
+    .long 0
+    .long 0
+    .long 0
+    .long 0
+    .long 0
+    # Graphics parameters
+    .long 0             # 0 = Linear Graphics Mode (framebuffer)
+    .long 1024          # Width
+    .long 768           # Height
+    .long 32            # BPP
 multiboot1_end:
 
 .align 8
