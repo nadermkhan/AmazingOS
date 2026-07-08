@@ -150,6 +150,30 @@ void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h
     }
 }
 
+void Framebuffer::draw_mac_wallpaper(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!initialized) return;
+    uint32_t end_x = x + w;
+    uint32_t end_y = y + h;
+    if (end_x > width) end_x = width;
+    if (end_y > height) end_y = height;
+
+    uint32_t pitch_words = pitch / 4;
+    for (uint32_t cy = y; cy < end_y; ++cy) {
+        uint32_t line_offset = cy * pitch_words;
+        for (uint32_t cx = x; cx < end_x; ++cx) {
+            // Diagonal gradient factor from 0 to 255 across screen coordinates
+            uint32_t factor = (cx + cy) * 255 / 1792; // 1792 = 1024 + 768
+            
+            // Interpolate RGB from Royal Purple (0x5E, 0x21, 0xD0) to Sapphire Blue (0x0F, 0x52, 0xBA)
+            uint32_t r = ((0x5E * (255 - factor)) + (0x0F * factor)) >> 8;
+            uint32_t g = ((0x21 * (255 - factor)) + (0x52 * factor)) >> 8;
+            uint32_t b = ((0xD0 * (255 - factor)) + (0xBA * factor)) >> 8;
+            
+            back_buffer[line_offset + cx] = (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
 void Framebuffer::draw_line(int x0, int y0, int x1, int y1, uint32_t color) {
     int dx = x1 - x0; if (dx < 0) dx = -dx;
     int dy = y1 - y0; if (dy < 0) dy = -dy;

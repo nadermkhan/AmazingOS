@@ -31,6 +31,14 @@ Window::Window(int id, int x, int y, int w, int h, const char* title, uint32_t c
     this->next = nullptr;
 }
 
+static inline uint32_t get_wallpaper_color(uint32_t cx, uint32_t cy) {
+    uint32_t factor = (cx + cy) * 255 / 1792;
+    uint32_t r = ((0x5E * (255 - factor)) + (0x0F * factor)) >> 8;
+    uint32_t g = ((0x21 * (255 - factor)) + (0x52 * factor)) >> 8;
+    uint32_t b = ((0xD0 * (255 - factor)) + (0xBC * factor)) >> 8;
+    return (r << 16) | (g << 8) | b;
+}
+
 static uint32_t cursor_bg_cache[256];
 static int cached_cursor_x = 0;
 static int cached_cursor_y = 0;
@@ -57,13 +65,13 @@ void Window::draw() {
     }
 
     // Shave top window corners to make them rounded (macOS Big Sur style)
-    drivers::Framebuffer::draw_pixel(rect.x, rect.y, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x + 1, rect.y, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x, rect.y + 1, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y, get_wallpaper_color(rect.x, rect.y));
+    drivers::Framebuffer::draw_pixel(rect.x + 1, rect.y, get_wallpaper_color(rect.x + 1, rect.y));
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y + 1, get_wallpaper_color(rect.x, rect.y + 1));
 
-    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 2, rect.y, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + 1, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y, get_wallpaper_color(rect.x + rect.w - 1, rect.y));
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 2, rect.y, get_wallpaper_color(rect.x + rect.w - 2, rect.y));
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + 1, get_wallpaper_color(rect.x + rect.w - 1, rect.y + 1));
 
     // 3. Render Title text (centered macOS style, dark grey text for light mode aesthetic)
     int title_len = 0;
@@ -90,13 +98,13 @@ void Window::draw() {
     }
 
     // Shave bottom window corners to make them rounded
-    drivers::Framebuffer::draw_pixel(rect.x, rect.y + rect.h - 1, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x + 1, rect.y + rect.h - 1, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x, rect.y + rect.h - 2, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y + rect.h - 1, get_wallpaper_color(rect.x, rect.y + rect.h - 1));
+    drivers::Framebuffer::draw_pixel(rect.x + 1, rect.y + rect.h - 1, get_wallpaper_color(rect.x + 1, rect.y + rect.h - 1));
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y + rect.h - 2, get_wallpaper_color(rect.x, rect.y + rect.h - 2));
 
-    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 1, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 2, rect.y + rect.h - 1, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 2, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 1, get_wallpaper_color(rect.x + rect.w - 1, rect.y + rect.h - 1));
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 2, rect.y + rect.h - 1, get_wallpaper_color(rect.x + rect.w - 2, rect.y + rect.h - 1));
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 2, get_wallpaper_color(rect.x + rect.w - 1, rect.y + rect.h - 2));
 }
 
 void WindowManager::init() {
@@ -199,8 +207,28 @@ void WindowManager::draw_mac_decorations() {
     drivers::Framebuffer::draw_rect(0, 0, 1024, 22, 0x00F0F0F0);
     drivers::Framebuffer::draw_rect(0, 22, 1024, 1, 0x00D2D2D2);
 
-    // 2. Draw Apple Menu items
-    drivers::Framebuffer::draw_string("Finder  File  Edit  View  Go  Window  Help", 20, 7, 0x00333333);
+    // 2. Draw Apple Logo and Menu Bar items
+    static const uint8_t apple_logo[8] = {
+        0b00011000, //   **  
+        0b00111100, //  **** 
+        0b01111110, // ******
+        0b11111111, //********
+        0b11111111, //********
+        0b11111111, //********
+        0b01111110, // ******
+        0b00110110  //  ** ** 
+    };
+    int start_x = 10;
+    int start_y = 7;
+    for (int r = 0; r < 8; ++r) {
+        uint8_t row_bits = apple_logo[r];
+        for (int c = 0; c < 8; ++c) {
+            if (row_bits & (0x80 >> c)) {
+                drivers::Framebuffer::draw_pixel(start_x + c, start_y + r, 0x00333333);
+            }
+        }
+    }
+    drivers::Framebuffer::draw_string("Finder  File  Edit  View  Go  Window  Help", 26, 7, 0x00333333);
     drivers::Framebuffer::draw_string("Wed 14:35", 930, 7, 0x00333333);
 
     // 3. Draw bottom macOS Dock (translucent centered tray)
@@ -212,18 +240,18 @@ void WindowManager::draw_mac_decorations() {
     drivers::Framebuffer::draw_rect(711, 710, 1, 48, 0x00C0C0C0);
 
     // Shave Dock corners to make it rounded
-    drivers::Framebuffer::draw_pixel(312, 710, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(313, 710, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(312, 711, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(711, 710, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(710, 710, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(711, 711, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(312, 757, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(313, 757, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(312, 756, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(711, 757, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(710, 757, 0x003A4E5C);
-    drivers::Framebuffer::draw_pixel(711, 756, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(312, 710, get_wallpaper_color(312, 710));
+    drivers::Framebuffer::draw_pixel(313, 710, get_wallpaper_color(313, 710));
+    drivers::Framebuffer::draw_pixel(312, 711, get_wallpaper_color(312, 711));
+    drivers::Framebuffer::draw_pixel(711, 710, get_wallpaper_color(711, 710));
+    drivers::Framebuffer::draw_pixel(710, 710, get_wallpaper_color(710, 710));
+    drivers::Framebuffer::draw_pixel(711, 711, get_wallpaper_color(711, 711));
+    drivers::Framebuffer::draw_pixel(312, 757, get_wallpaper_color(312, 757));
+    drivers::Framebuffer::draw_pixel(313, 757, get_wallpaper_color(313, 757));
+    drivers::Framebuffer::draw_pixel(312, 756, get_wallpaper_color(312, 756));
+    drivers::Framebuffer::draw_pixel(711, 757, get_wallpaper_color(711, 757));
+    drivers::Framebuffer::draw_pixel(710, 757, get_wallpaper_color(710, 757));
+    drivers::Framebuffer::draw_pixel(711, 756, get_wallpaper_color(711, 756));
 
     // 4. Draw Dock Application Icons (colored rounded squares with clean identifiers)
     drivers::Framebuffer::draw_rect(332, 716, 36, 36, 0x001B72E8); // Finder (Blue)
@@ -250,8 +278,8 @@ void WindowManager::draw_desktop() {
 }
 
 void WindowManager::force_redraw_all() {
-    // Clear back buffer
-    drivers::Framebuffer::clear(0x003A4E5C);
+    // Clear back buffer with gradient wallpaper
+    drivers::Framebuffer::draw_mac_wallpaper(0, 0, 1024, 768);
     
     // Draw macOS desktop decorations
     draw_mac_decorations();
@@ -388,8 +416,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
 
             Rect dirty = { x_min, y_min, x_max - x_min, y_max - y_min };
 
-            // 1. Clear dirty region in back buffer to background color
-            drivers::Framebuffer::draw_rect(dirty.x, dirty.y, dirty.w, dirty.h, 0x003A4E5C);
+            // 1. Clear dirty region in back buffer to gradient wallpaper
+            drivers::Framebuffer::draw_mac_wallpaper(dirty.x, dirty.y, dirty.w, dirty.h);
 
             // 2. Draw macOS desktop decorations in back buffer
             draw_mac_decorations();
