@@ -4,6 +4,8 @@
 #include "gdt.hpp"
 #include "idt.hpp"
 #include "../drivers/apic.hpp"
+#include "pmm.hpp"
+#include "vmm.hpp"
 
 // Define an empty dummy __main function to satisfy MinGW's global constructor initialization stub
 extern "C" void __main() {}
@@ -11,7 +13,7 @@ extern "C" void __main() {}
 // Static memory buffer representing the storage of the mock file
 static char test_file_buffer[256];
 
-extern "C" void kmain() {
+extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) {
     // 1. Initialize serial port COM1 first for logging
     bool serial_ok = drivers::Serial::init();
     
@@ -43,7 +45,23 @@ extern "C" void kmain() {
         }
     }
 
-    // 5. Initialize VGA text-mode graphics console
+    // 5. Initialize Physical Memory Manager (PMM)
+    bool pmm_ok = kernel::pmm_init(magic, maddr);
+    if (serial_ok) {
+        if (pmm_ok) {
+            drivers::Serial::println("[INIT] Physical Memory Manager (PMM) initialized.");
+        } else {
+            drivers::Serial::println("[ERROR] Physical Memory Manager (PMM) failed!");
+        }
+    }
+
+    // 6. Initialize Virtual Memory Manager (VMM)
+    kernel::vmm_init();
+    if (serial_ok) {
+        drivers::Serial::println("[INIT] Virtual Memory Manager (VMM) initialized.");
+    }
+
+    // 7. Initialize VGA text-mode graphics console
     drivers::Vga::init();
     drivers::Vga::set_color(drivers::VgaColor::LIGHT_CYAN, drivers::VgaColor::BLACK);
     drivers::Vga::println("Welcome to CrecentKernel!");
@@ -55,7 +73,7 @@ extern "C" void kmain() {
         drivers::Serial::println("[INIT] VGA text console initialized.");
     }
 
-    // 6. Initialize Virtual File System
+    // 8. Initialize Virtual File System
     if (!fs::VFS::init()) {
         drivers::Vga::set_color(drivers::VgaColor::RED, drivers::VgaColor::BLACK);
         drivers::Vga::println("[ERROR] Failed to initialize Virtual File System!");
@@ -70,7 +88,7 @@ extern "C" void kmain() {
         drivers::Serial::println("[INIT] VFS root directory '/' registered.");
     }
 
-    // 7. Create and mount a mock file, write test data, and verify by reading back
+    // 9. Create and mount a mock file, write test data, and verify by reading back
     {
         const char* filepath = "/test.txt";
         drivers::Vga::print("[VFS] Creating mock file: ");
@@ -146,7 +164,7 @@ extern "C" void kmain() {
         }
     }
 
-    // 8. Interrupt & Exception Verification Testing
+    // 10. Interrupt Verification Testing
     drivers::Vga::println("");
     drivers::Vga::println("[TEST] Triggering Software Interrupt 0x80...");
     if (serial_ok) {
@@ -161,6 +179,107 @@ extern "C" void kmain() {
         drivers::Serial::println("[TEST] Software Interrupt 0x80 returned successfully.");
     }
 
+    // 11. Memory Management Verification Testing
+    drivers::Vga::println("");
+    drivers::Vga::println("[TEST] Starting Memory Management verification...");
+    if (serial_ok) {
+        drivers::Serial::println("[TEST] Starting Memory Management verification...");
+    }
+
+    if (pmm_ok) {
+        uint64_t phys_frame = kernel::pmm_alloc_frame();
+        if (phys_frame == 0) {
+            drivers::Vga::set_color(drivers::VgaColor::RED, drivers::VgaColor::BLACK);
+            drivers::Vga::println("[TEST] PMM allocation: FAILED (No physical frames!)");
+            goto exception_test;
+        }
+        drivers::Vga::println("[TEST] Allocated physical page frame successfully.");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] Allocated physical page frame successfully.");
+        }
+
+        // Map virtual page 0x100000000 to the allocated physical frame
+        // Flags: Present (1) + Writable (2)
+        uint64_t test_virt = 0x100000000ULL;
+        bool map_ok = kernel::vmm_map_page(test_virt, phys_frame, kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE);
+        if (!map_ok) {
+            drivers::Vga::set_color(drivers::VgaColor::RED, drivers::VgaColor::BLACK);
+            drivers::Vga::println("[TEST] VMM map page: FAILED");
+            goto exception_test;
+        }
+        drivers::Vga::println("[TEST] Mapped virtual page 0x100000000 successfully.");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] Mapped virtual page 0x100000000 successfully.");
+        }
+
+        // Verify VMM mapping status
+        if (!kernel::vmm_is_mapped(test_virt)) {
+            drivers::Vga::println("[TEST] vmm_is_mapped: FAILED");
+            goto exception_test;
+        }
+
+        // Write signature string into the mapped virtual page
+        char* test_ptr = (char*)test_virt;
+        const char* sig = "CrecentMemoryVerify";
+        size_t sig_len = 0;
+        while (sig[sig_len] != '\0') {
+            test_ptr[sig_len] = sig[sig_len];
+            sig_len++;
+        }
+        test_ptr[sig_len] = '\0';
+
+        drivers::Vga::println("[TEST] Write verification string: OK");
+
+        // Read back and verify
+        bool sig_match = true;
+        for (size_t i = 0; i < sig_len; ++i) {
+            if (test_ptr[i] != sig[i]) {
+                sig_match = false;
+                break;
+            }
+        }
+
+        if (sig_match) {
+            drivers::Vga::print("[TEST] Read verification data: \"");
+            drivers::Vga::print(test_ptr);
+            drivers::Vga::println("\" - OK");
+            if (serial_ok) {
+                drivers::Serial::print("[TEST] Verification read back: \"");
+                drivers::Serial::print(test_ptr);
+                drivers::Serial::println("\" - SUCCESS");
+            }
+        } else {
+            drivers::Vga::set_color(drivers::VgaColor::RED, drivers::VgaColor::BLACK);
+            drivers::Vga::println("[TEST] Read verification data: FAILED (data mismatch!)");
+        }
+
+        // Unmap the page
+        kernel::vmm_unmap_page(test_virt);
+        drivers::Vga::println("[TEST] Unmapped virtual page 0x100000000 successfully.");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] Unmapped virtual page 0x100000000 successfully.");
+        }
+
+        // Free the physical frame
+        kernel::pmm_free_frame(phys_frame);
+        drivers::Vga::println("[TEST] Freed physical page frame.");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] Freed physical page frame.");
+        }
+
+        // Trigger page fault by reading from the unmapped address to demonstrate exception routing
+        drivers::Vga::println("[TEST] Reading unmapped address to trigger Page Fault (#PF)...");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] Reading unmapped address to trigger Page Fault (#PF)...");
+        }
+
+        // Force read (will trigger exception 14)
+        volatile char fault = *test_ptr;
+        (void)fault; // Prevent compiler unused warning
+    }
+
+exception_test:
+    // Fallback CPU exception trigger
     drivers::Vga::println("");
     drivers::Vga::println("[TEST] Triggering CPU exception (Divide by Zero)...");
     if (serial_ok) {

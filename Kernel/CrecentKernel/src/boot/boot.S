@@ -47,6 +47,9 @@ boot_entry:
     jmp no_multiboot
 
 .magic_ok:
+    # Save Multiboot parameters (eax = magic, ebx = MBI physical address)
+    movl %eax, %edi
+    movl %ebx, %esi
 
     # Set up a temporary stack for 32-bit mode execution
     movl $boot_stack_top, %esp
@@ -61,34 +64,36 @@ boot_entry:
     orl $3, %eax       # Present + Writable
     movl %eax, pml4
 
-    # PDPT[0] -> PD
-    movl $pd, %eax
+    # PDPT[0..3] -> pd0..pd3 (maps 0GB - 4GB region)
+    movl $pd0, %eax
     orl $3, %eax       # Present + Writable
     movl %eax, pdpt
 
-    # PDPT[3] -> pd_high (to map 3GB - 4GB region)
-    movl $pd_high, %eax
+    movl $pd1, %eax
     orl $3, %eax       # Present + Writable
-    movl %eax, pdpt+24 # Entry 3 is at offset 24 bytes
+    movl %eax, pdpt+8
 
-    # pd_high[503] -> 0xFEE00000 (Local APIC Base address, 2MB huge page)
-    movl $0xFEE00083, %eax # Present + Writable + Page Size (2MB)
-    movl %eax, pd_high+(503*8)
-    movl $0, pd_high+(503*8)+4
+    movl $pd2, %eax
+    orl $3, %eax       # Present + Writable
+    movl %eax, pdpt+16
 
-    # PD entries -> Map 512 entries of 2MB (Total 1GB identity map)
+    movl $pd3, %eax
+    orl $3, %eax       # Present + Writable
+    movl %eax, pdpt+24
+
+    # Contiguous pd0..pd3 entries -> Map 2048 entries of 2MB (Total 4GB identity map)
     movl $0, %ecx
 .map_pd_loop:
     movl %ecx, %eax
     shll $21, %eax      # EAX = ECX * 2MB
     orl $0x83, %eax     # Present + Writable + Page Size (2MB huge page)
     
-    # Store into 64-bit entry (lower 32-bit in EAX, upper 32-bit as 0)
-    movl %eax, pd(,%ecx,8)
-    movl $0, pd+4(,%ecx,8)
+    # Store into 64-bit entries inside pd0..pd3 contiguous space
+    movl %eax, pd0(,%ecx,8)
+    movl $0, pd0+4(,%ecx,8)
 
     incl %ecx
-    cmpl $512, %ecx
+    cmpl $2048, %ecx
     jne .map_pd_loop
 
     # --- Enable Paging and Long Mode ---
@@ -174,9 +179,13 @@ pml4:
     .skip 4096
 pdpt:
     .skip 4096
-pd:
+pd0:
     .skip 4096
-pd_high:
+pd1:
+    .skip 4096
+pd2:
+    .skip 4096
+pd3:
     .skip 4096
 
 .align 16
