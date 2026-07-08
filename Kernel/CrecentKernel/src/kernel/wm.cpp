@@ -2949,18 +2949,15 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                 active_window->rect.x = next_x;
                 active_window->rect.y = next_y;
 
-                // Unified Bounding Box Strategy (Fixes overlapping tearing)
-                int x_min = old_rect.x < next_x ? old_rect.x : next_x;
-                int y_min = old_rect.y < next_y ? old_rect.y : next_y;
-                int x_max = (old_rect.x + old_rect.w > next_x + active_window->rect.w) ? (old_rect.x + old_rect.w) : (next_x + active_window->rect.w);
-                int y_max = (old_rect.y + old_rect.h > next_y + active_window->rect.h) ? (old_rect.y + old_rect.h) : (next_y + active_window->rect.h);
+                // Unified Bounding Box Strategy (Eliminates intersecting VRAM double-writes)
+                int min_x = old_rect.x < next_x ? old_rect.x : next_x;
+                int min_y = old_rect.y < next_y ? old_rect.y : next_y;
+                int max_x = (old_rect.x + old_rect.w > next_x + active_window->rect.w) ? (old_rect.x + old_rect.w) : (next_x + active_window->rect.w);
+                int max_y = (old_rect.y + old_rect.h > next_y + active_window->rect.h) ? (old_rect.y + old_rect.h) : (next_y + active_window->rect.h);
 
-                // Encompass shadow bounds
-                x_min -= 32; y_min -= 32;
-                x_max += 32; y_max += 32;
-
-                dirty = {x_min, y_min, x_max - x_min, y_max - y_min};
-                needs_redraw = true; // Let the standard pipeline safely render it once
+                dirty = {min_x - 32, min_y - 32, max_x - min_x + 64, max_y - min_y + 64};
+                needs_redraw = true; // Route through the standard, safe single-pass pipeline
+                state_updated = true;
             }
         } else if (active_window && is_resizing_window) {
             int next_w = resize_start_w + (new_x - click_start_x);

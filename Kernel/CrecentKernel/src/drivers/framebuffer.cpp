@@ -107,11 +107,22 @@ bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, u
 }
 
 void Framebuffer::set_clip_rect(Rect r) {
-    int cx = r.x; if (cx < 0) cx = 0;
-    int cy = r.y; if (cy < 0) cy = 0;
-    int cw = r.w; if (cx + cw > (int)width) cw = width - cx;
-    int ch = r.h; if (cy + ch > (int)height) ch = height - cy;
-    clip_rect = {cx, cy, cw, ch};
+    int x1 = r.x;
+    int y1 = r.y;
+    int x2 = r.x + r.w;
+    int y2 = r.y + r.h;
+
+    // Enforce hard hardware boundaries
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > (int)width) x2 = (int)width;
+    if (y2 > (int)height) y2 = (int)height;
+    
+    // Prevent inversion anomalies
+    if (x2 < x1) x2 = x1;
+    if (y2 < y1) y2 = y1;
+
+    clip_rect = {x1, y1, x2 - x1, y2 - y1};
 }
 
 void Framebuffer::clear_clip_rect() {
@@ -515,18 +526,28 @@ void Framebuffer::blit_buffer(int x, int y, int w, int h, const uint32_t* src_bu
 void Framebuffer::swap_dirty_rect_fast(Rect r) {
     if (!initialized) return;
 
-    int x0 = r.x; if (x0 < 0) x0 = 0;
-    int y0 = r.y; if (y0 < 0) y0 = 0;
-    int x1 = r.x + r.w; if (x1 > (int)width) x1 = width;
-    int y1 = r.y + r.h; if (y1 > (int)height) y1 = height;
+    int x1 = r.x;
+    int y1 = r.y;
+    int x2 = r.x + r.w;
+    int y2 = r.y + r.h;
+
+    // Enforce hard hardware boundaries
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > (int)width) x2 = (int)width;
+    if (y2 > (int)height) y2 = (int)height;
     
-    if (x0 >= x1 || y0 >= y1) return;
+    // Prevent inversion anomalies
+    if (x2 < x1) x2 = x1;
+    if (y2 < y1) y2 = y1;
+
+    if (x1 >= x2 || y1 >= y2) return;
 
     uint32_t pitch_words = pitch / 4;
-    uint32_t bytes_to_copy = (x1 - x0) * sizeof(uint32_t);
-    for (int y = y0; y < y1; ++y) {
+    uint32_t bytes_to_copy = (x2 - x1) * sizeof(uint32_t);
+    for (int y = y1; y < y2; ++y) {
         uint32_t line_offset = y * pitch_words;
-        memcpy(virtual_base + line_offset + x0, back_buffer + line_offset + x0, bytes_to_copy);
+        memcpy(virtual_base + line_offset + x1, back_buffer + line_offset + x1, bytes_to_copy);
     }
 }
 
