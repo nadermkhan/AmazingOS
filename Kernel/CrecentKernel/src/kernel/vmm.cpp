@@ -11,6 +11,9 @@ void vmm_init() {
     __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(cr3_val));
     // Clear lower 12 flags bits to retrieve physical base address of active PML4
     active_pml4 = cr3_val & ~0xFFFULL;
+
+    // Set USER privilege flag on PML4 entry 0 to allow Ring 3 privilege resolution under 512GB
+    ((uint64_t*)active_pml4)[0] |= VMM_FLAG_USER;
 }
 
 bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -132,6 +135,31 @@ uint64_t vmm_get_phys(uint64_t virt) {
     if (!(pt[pt_idx] & VMM_FLAG_PRESENT)) return 0;
 
     return (pt[pt_idx] & ~0xFFFULL) + (virt & 0xFFFULL);
+}
+
+bool vmm_is_user_mapped(uint64_t virt) {
+    uint64_t* pml4 = (uint64_t*)active_pml4;
+    size_t pml4_idx = (virt >> 39) & 0x1FF;
+    size_t pdpt_idx = (virt >> 30) & 0x1FF;
+    size_t pd_idx   = (virt >> 21) & 0x1FF;
+    size_t pt_idx   = (virt >> 12) & 0x1FF;
+
+    if (!(pml4[pml4_idx] & VMM_FLAG_PRESENT)) return false;
+    if (!(pml4[pml4_idx] & VMM_FLAG_USER)) return false;
+
+    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFULL);
+    if (!(pdpt[pdpt_idx] & VMM_FLAG_PRESENT)) return false;
+    if (!(pdpt[pdpt_idx] & VMM_FLAG_USER)) return false;
+
+    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
+    if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return false;
+    if (!(pd[pd_idx] & VMM_FLAG_USER)) return false;
+
+    if (pd[pd_idx] & VMM_FLAG_HUGE) return true;
+
+    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFULL);
+    if (!(pt[pt_idx] & VMM_FLAG_PRESENT)) return false;
+    return (pt[pt_idx] & VMM_FLAG_USER) != 0;
 }
 
 } // namespace kernel

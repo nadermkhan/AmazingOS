@@ -16,8 +16,11 @@ struct Thread {
     uint64_t id;           // Unique Thread ID
     ThreadState state;     // Thread execution state
     void* stack_limit;     // Physical address of the allocated stack page (for cleanup)
+    uint64_t rsp0;         // Top of kernel stack (for syscall RSP restore)
     Thread* next;          // Queue link
 };
+
+extern "C" Thread* current_thread;
 
 // Initialize the scheduler and register the main (boot) thread
 void scheduler_init();

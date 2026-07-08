@@ -32,6 +32,9 @@ bool vmm_unmap_page(uint64_t virt);
 // Check if a virtual address is mapped in the page directory structure
 bool vmm_is_mapped(uint64_t virt);
 
+// Verify if a virtual address is mapped and has Ring 3 User access rights
+bool vmm_is_user_mapped(uint64_t virt);
+
 // Translate a virtual address to its corresponding physical address
 // Returns 0 if the address is not mapped
 uint64_t vmm_get_phys(uint64_t virt);

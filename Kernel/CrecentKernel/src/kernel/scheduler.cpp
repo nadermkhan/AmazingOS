@@ -1,13 +1,17 @@
 #include "scheduler.hpp"
 #include "heap.hpp"
+#include "gdt.hpp"
 #include "../drivers/serial.hpp"
+
+extern "C" {
+    kernel::Thread* current_thread = nullptr;
+}
 
 namespace kernel {
 
 // Queue pointers for Runnable threads
 static Thread* run_queue_head = nullptr;
 static Thread* run_queue_tail = nullptr;
-static Thread* current_thread = nullptr;
 
 static Thread main_thread;
 static uint64_t next_thread_id = 0;
@@ -63,13 +67,19 @@ static Thread* dequeue() {
     return t;
 }
 
+extern "C" char boot_stack_top[];
+
 void scheduler_init() {
     main_thread.rsp = 0;
     main_thread.id = next_thread_id++;
     main_thread.state = THREAD_RUNNING;
     main_thread.stack_limit = nullptr;
+    main_thread.rsp0 = (uint64_t)boot_stack_top;
     main_thread.next = nullptr;
     current_thread = &main_thread;
+
+    // Load boot thread's kernel stack top into TSS for privilege transition exception safety
+    gdt_update_tss_rsp0(main_thread.rsp0);
 
     drivers::Serial::println("[INIT] Multitasking scheduler initialized.");
 }
@@ -105,6 +115,7 @@ Thread* thread_create(void (*func)(void*), void* arg) {
     t->id = next_thread_id++;
     t->state = THREAD_RUNNABLE;
     t->stack_limit = stack_page;
+    t->rsp0 = (uint64_t)stack_page + 4096;
     t->next = nullptr;
 
     // 4. Add to run queue
@@ -154,6 +165,9 @@ void schedule() {
     next->state = THREAD_RUNNING;
     current_thread = next;
 
+    // Load next thread's kernel stack top into TSS for privilege transition exception safety
+    gdt_update_tss_rsp0(next->rsp0);
+
     // Perform context switch
     context_switch(next, prev);
 
@@ -192,6 +206,9 @@ void thread_exit() {
     // Set terminated thread resources for cleanup by next scheduled thread
     stack_to_free = current->stack_limit;
     thread_to_free = current;
+
+    // Load next thread's kernel stack top into TSS
+    gdt_update_tss_rsp0(next->rsp0);
 
     // Dummy stack location to switch out of
     static uint64_t dummy_rsp;

@@ -48,4 +48,7 @@ struct __attribute__((packed)) GdtPointer {
 // Initialize the GDT, load GDT and segment registers, register the TSS, and configure the IST stack
 void gdt_init();
 
+// Dynamically update the TSS RSP0 field (kernel stack top) during thread context switches
+void gdt_update_tss_rsp0(uint64_t rsp0);
+
 } // namespace kernel

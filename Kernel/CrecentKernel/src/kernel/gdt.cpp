@@ -113,4 +113,8 @@ void gdt_init() {
     );
 }
 
+void gdt_update_tss_rsp0(uint64_t rsp0) {
+    tss.rsp0 = rsp0;
+}
+
 } // namespace kernel

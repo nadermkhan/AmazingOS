@@ -9,6 +9,7 @@
 #include "vmm.hpp"
 #include "heap.hpp"
 #include "scheduler.hpp"
+#include "syscall.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -54,6 +55,124 @@ void thread_b_func(void* arg) {
 void thread_c_func(void* arg) {
     (void)arg;
     drivers::Serial::println("\n[THREAD C] Started and now exiting immediately.");
+}
+
+// User-space system call helper using assembly syscall instructions
+static inline uint64_t user_syscall3(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
+    uint64_t ret;
+    __asm__ __volatile__ (
+        "movq %1, %%rax\n\t"
+        "movq %2, %%rdi\n\t"
+        "movq %3, %%rsi\n\t"
+        "movq %4, %%rdx\n\t"
+        "syscall\n\t"
+        "movq %%rax, %0"
+        : "=r"(ret)
+        : "r"(num), "r"(a1), "r"(a2), "r"(a3)
+        : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "r8", "r9", "r10", "memory"
+    );
+    return ret;
+}
+
+static inline void user_write(const char* msg, size_t len) {
+    user_syscall3(1, 1, (uint64_t)msg, len);
+}
+
+static inline void user_yield() {
+    user_syscall3(2, 0, 0, 0);
+}
+
+static inline void user_exit() {
+    user_syscall3(3, 0, 0, 0);
+}
+
+// User-space thread entry point
+void user_thread_entry() {
+    char msg1[33];
+    msg1[0] = 'H'; msg1[1] = 'e'; msg1[2] = 'l'; msg1[3] = 'l'; msg1[4] = 'o';
+    msg1[5] = ' '; msg1[6] = 'f'; msg1[7] = 'r'; msg1[8] = 'o'; msg1[9] = 'm';
+    msg1[10] = ' '; msg1[11] = 'U'; msg1[12] = 's'; msg1[13] = 'e'; msg1[14] = 'r';
+    msg1[15] = ' '; msg1[16] = 'S'; msg1[17] = 'p'; msg1[18] = 'a'; msg1[19] = 'c';
+    msg1[20] = 'e'; msg1[21] = ' '; msg1[22] = '('; msg1[23] = 'R'; msg1[24] = 'i';
+    msg1[25] = 'n'; msg1[26] = 'g'; msg1[27] = ' '; msg1[28] = '3'; msg1[29] = ')';
+    msg1[30] = '!'; msg1[31] = '\n'; msg1[32] = '\0';
+    user_write(msg1, 32);
+
+    user_yield();
+
+    char msg2[28];
+    msg2[0] = 'U'; msg2[1] = 's'; msg2[2] = 'e'; msg2[3] = 'r'; msg2[4] = ' ';
+    msg2[5] = 's'; msg2[6] = 'p'; msg2[7] = 'a'; msg2[8] = 'c'; msg2[9] = 'e';
+    msg2[10] = ' '; msg2[11] = 't'; msg2[12] = 'h'; msg2[13] = 'r'; msg2[14] = 'e';
+    msg2[15] = 'a'; msg2[16] = 'd'; msg2[17] = ' '; msg2[18] = 'r'; msg2[19] = 'e';
+    msg2[20] = 's'; msg2[21] = 'u'; msg2[22] = 'm'; msg2[23] = 'e'; msg2[24] = 'd';
+    msg2[25] = '!'; msg2[26] = '\n'; msg2[27] = '\0';
+    user_write(msg2, 27);
+
+    user_exit();
+}
+
+// User-space security verification thread
+void user_security_entry() {
+    // 1. Attempt to call sys_write with kernel address 0x100000 (kernel code)
+    uint64_t ret = user_syscall3(1, 1, 0x100000ULL, 10);
+
+    char ok_msg[45];
+    if (ret == (uint64_t)-1) {
+        ok_msg[0] = '['; ok_msg[1] = 'S'; ok_msg[2] = 'E'; ok_msg[3] = 'C'; ok_msg[4] = 'U';
+        ok_msg[5] = 'R'; ok_msg[6] = 'I'; ok_msg[7] = 'T'; ok_msg[8] = 'Y'; ok_msg[9] = ']';
+        ok_msg[10] = ' '; ok_msg[11] = 'K'; ok_msg[12] = 'e'; ok_msg[13] = 'r'; ok_msg[14] = 'n';
+        ok_msg[15] = 'e'; ok_msg[16] = 'l'; ok_msg[17] = ' '; ok_msg[18] = 'p'; ok_msg[19] = 'o';
+        ok_msg[20] = 'i'; ok_msg[21] = 'n'; ok_msg[22] = 't'; ok_msg[23] = 'e'; ok_msg[24] = 'r';
+        ok_msg[25] = ' '; ok_msg[26] = 'b'; ok_msg[27] = 'l'; ok_msg[28] = 'o'; ok_msg[29] = 'c';
+        ok_msg[30] = 'k'; ok_msg[31] = 'e'; ok_msg[32] = 'd'; ok_msg[33] = ' '; ok_msg[34] = '-';
+        ok_msg[35] = ' '; ok_msg[36] = 'S'; ok_msg[37] = 'U'; ok_msg[38] = 'C'; ok_msg[39] = 'C';
+        ok_msg[40] = 'E'; ok_msg[41] = 'S'; ok_msg[42] = 'S'; ok_msg[43] = '\n'; ok_msg[44] = '\0';
+        user_write(ok_msg, 44);
+    } else {
+        ok_msg[0] = '['; ok_msg[1] = 'S'; ok_msg[2] = 'E'; ok_msg[3] = 'C'; ok_msg[4] = 'U';
+        ok_msg[5] = 'R'; ok_msg[6] = 'I'; ok_msg[7] = 'T'; ok_msg[8] = 'Y'; ok_msg[9] = ']';
+        ok_msg[10] = ' '; ok_msg[11] = 'L'; ok_msg[12] = 'e'; ok_msg[13] = 'a'; ok_msg[14] = 'k';
+        ok_msg[15] = 'e'; ok_msg[16] = 'd'; ok_msg[17] = ' '; ok_msg[18] = 'K'; ok_msg[19] = 'e';
+        ok_msg[20] = 'r'; ok_msg[21] = 'n'; ok_msg[22] = 'e'; ok_msg[23] = 'l'; ok_msg[24] = ' ';
+        ok_msg[25] = 'M'; ok_msg[26] = 'e'; ok_msg[27] = 'm'; ok_msg[28] = 'o'; ok_msg[29] = 'r';
+        ok_msg[30] = 'y'; ok_msg[31] = '!'; ok_msg[32] = '\n'; ok_msg[33] = '\0';
+        user_write(ok_msg, 33);
+    }
+    user_exit();
+}
+
+struct UserBootstrapArgs {
+    void (*entry_func)();
+    uint64_t code_virt;
+    uint64_t stack_virt;
+};
+
+// Kernel thread that allocates User virtual memory and jumps to user space
+void user_bootstrap_thread(void* arg) {
+    UserBootstrapArgs* args = (UserBootstrapArgs*)arg;
+    void (*entry_func)() = args->entry_func;
+    uint64_t code_virt = args->code_virt;
+    uint64_t stack_virt = args->stack_virt;
+    delete args; // Clean up parameter structure on kernel slab heap
+
+    // 1. Allocate physical pages for user space code and stack
+    uint64_t code_phys = kernel::pmm_alloc_frame();
+    uint64_t stack_phys = kernel::pmm_alloc_frame();
+
+    // 3. Map pages with PRESENT, WRITABLE, and USER permissions
+    kernel::vmm_map_page(code_virt, code_phys, kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_USER);
+    kernel::vmm_map_page(stack_virt, stack_phys, kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_USER);
+
+    // 4. Copy 2048 bytes of entry function code to prevent truncation
+    char* src = (char*)entry_func;
+    char* dest = (char*)code_phys;
+    for (size_t i = 0; i < 2048; ++i) {
+        dest[i] = src[i];
+    }
+
+    // 5. Jump to User Mode (Ring 3)
+    kernel::jump_to_user_mode((void(*)())code_virt, (void*)(stack_virt + 4096));
 }
 
 // Define an empty dummy __main function to satisfy MinGW's global constructor initialization stub
@@ -122,6 +241,9 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
 
     // Initialize Multitasking Scheduler
     kernel::scheduler_init();
+
+    // Initialize System Calls (MSR registers SCE setup)
+    kernel::syscall_init();
 
     // 8. Initialize VGA text-mode graphics console
     drivers::Vga::init();
@@ -513,6 +635,14 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         kernel::thread_create(thread_a_func, nullptr);
         kernel::thread_create(thread_b_func, nullptr);
         kernel::thread_create(thread_c_func, nullptr);
+
+        // Spawn User Space Thread (Ring 3 transition & syscall print/yield test)
+        UserBootstrapArgs* u_args1 = new UserBootstrapArgs{user_thread_entry, 0x400000000ULL, 0x400001000ULL};
+        kernel::thread_create(user_bootstrap_thread, u_args1);
+
+        // Spawn User Space Security verification thread (verifies kernel address protection)
+        UserBootstrapArgs* u_args2 = new UserBootstrapArgs{user_security_entry, 0x500000000ULL, 0x500001000ULL};
+        kernel::thread_create(user_bootstrap_thread, u_args2);
 
         // Initialize Local APIC Timer (periodic Vector 32 ticks)
         drivers::Apic::init_timer(0x80000);

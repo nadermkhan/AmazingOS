@@ -17,7 +17,7 @@ TARGET_PE = kernel.exe
 TARGET_ELF = kernel.bin
 
 # Object files mapping
-OBJS = boot.o main.o vga.o serial.o vfs.o gdt.o idt.o apic.o interrupts.o pmm.o vmm.o heap.o switch.o scheduler.o tarfs.o
+OBJS = boot.o main.o vga.o serial.o vfs.o gdt.o idt.o apic.o interrupts.o pmm.o vmm.o heap.o switch.o scheduler.o tarfs.o syscall.o syscall_asm.o
 
 .PHONY: all clean qemu
 
@@ -76,6 +76,12 @@ scheduler.o: src/kernel/scheduler.cpp
 
 tarfs.o: src/fs/tarfs.cpp
 	$(CXX) $(CXXFLAGS) -c src/fs/tarfs.cpp -o tarfs.o
+
+syscall.o: src/kernel/syscall.cpp
+	$(CXX) $(CXXFLAGS) -c src/kernel/syscall.cpp -o syscall.o
+
+syscall_asm.o: src/kernel/syscall.S
+	$(CXX) -c src/kernel/syscall.S -o syscall_asm.o
 
 # Clean up build artifacts
 clean:
