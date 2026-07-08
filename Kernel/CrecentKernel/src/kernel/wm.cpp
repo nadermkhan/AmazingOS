@@ -18,6 +18,8 @@ int WindowManager::drag_offset_y = 0;
 Window::Window(int id, int x, int y, int w, int h, const char* title, uint32_t color) {
     this->id = id;
     this->rect = {x, y, w, h};
+    this->orig_rect = {x, y, w, h};
+    this->is_maximized = false;
     
     int i = 0;
     while (title[i] && i < 63) {
@@ -47,6 +49,11 @@ static bool cursor_cached = false;
 void Window::draw() {
     uint8_t alpha = is_dragging ? 140 : 255;
     
+    // Draw translucent 3D drop shadows (bottom and right borders)
+    // 4px wide, black color (0x00000000) with alpha = 60
+    drivers::Framebuffer::draw_rect_alpha(rect.x + 4, rect.y + rect.h, rect.w, 4, 0x00000000, 60);
+    drivers::Framebuffer::draw_rect_alpha(rect.x + rect.w, rect.y + 4, 4, rect.h - 4, 0x00000000, 60);
+
     // 1. Draw outer frame border (macOS thin grey outline border)
     if (is_dragging) {
         drivers::Framebuffer::draw_rect_alpha(rect.x, rect.y, rect.w, rect.h, 0x00D0D0D0, alpha);
@@ -91,10 +98,16 @@ void Window::draw() {
     }
 
     // 5. Fill Window Client Area (Window background body - clean white)
-    if (is_dragging) {
-        drivers::Framebuffer::draw_rect_alpha(rect.x + 1, rect.y + 23, rect.w - 2, rect.h - 24, bg_color, alpha);
+    bool isTerminal = (title[0] == 'T' && title[1] == 'e' && title[2] == 'r' && title[3] == 'm' && title[4] == 'i' && title[5] == 'n' && title[6] == 'a' && title[7] == 'l' && title[8] == '\0');
+    if (isTerminal) {
+        // Terminal is ALWAYS translucent dark charcoal, even when not dragging!
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 1, rect.y + 23, rect.w - 2, rect.h - 24, bg_color, is_dragging ? 120 : 180);
     } else {
-        drivers::Framebuffer::draw_rect(rect.x + 1, rect.y + 23, rect.w - 2, rect.h - 24, bg_color);
+        if (is_dragging) {
+            drivers::Framebuffer::draw_rect_alpha(rect.x + 1, rect.y + 23, rect.w - 2, rect.h - 24, bg_color, alpha);
+        } else {
+            drivers::Framebuffer::draw_rect(rect.x + 1, rect.y + 23, rect.w - 2, rect.h - 24, bg_color);
+        }
     }
 
     // Shave bottom window corners to make them rounded
@@ -105,6 +118,34 @@ void Window::draw() {
     drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 1, get_wallpaper_color(rect.x + rect.w - 1, rect.y + rect.h - 1));
     drivers::Framebuffer::draw_pixel(rect.x + rect.w - 2, rect.y + rect.h - 1, get_wallpaper_color(rect.x + rect.w - 2, rect.y + rect.h - 1));
     drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 2, get_wallpaper_color(rect.x + rect.w - 1, rect.y + rect.h - 2));
+
+    // 6. Draw custom mock content for styled apps
+    const char* t = title;
+    if (isTerminal) {
+        drivers::Framebuffer::draw_string("crecent@macos:~$ neofetch", rect.x + 10, rect.y + 30, 0x004AF02C); // Green prompt
+        drivers::Framebuffer::draw_string("OS: CrecentOS Whitesur 1.0", rect.x + 10, rect.y + 46, 0x00D0D0D0);
+        drivers::Framebuffer::draw_string("Kernel: x86_64 Freestanding Core", rect.x + 10, rect.y + 60, 0x00D0D0D0);
+        drivers::Framebuffer::draw_string("Shell: Terminal (Ring 0 Compositor)", rect.x + 10, rect.y + 74, 0x00D0D0D0);
+        drivers::Framebuffer::draw_string("Resolution: 1024x768 (60 FPS VBE)", rect.x + 10, rect.y + 88, 0x00D0D0D0);
+        drivers::Framebuffer::draw_string("Uptime: 2 mins", rect.x + 10, rect.y + 102, 0x00D0D0D0);
+        drivers::Framebuffer::draw_string("crecent@macos:~$ _", rect.x + 10, rect.y + 120, 0x00FFFFFF);
+    } else if (t[0] == 'F' && t[1] == 'i' && t[2] == 'n' && t[3] == 'd' && t[4] == 'e' && t[5] == 'r' && t[6] == '\0') {
+        // Mock Finder Content
+        drivers::Framebuffer::draw_rect(rect.x + 20, rect.y + 40, 24, 18, 0x0000A2C9); // Folder icon (Cyan)
+        drivers::Framebuffer::draw_string("tar", rect.x + 20, rect.y + 62, 0x00333333);
+        
+        drivers::Framebuffer::draw_rect(rect.x + 75, rect.y + 40, 24, 18, 0x0000A2C9); // Folder icon (Cyan)
+        drivers::Framebuffer::draw_string("dev", rect.x + 75, rect.y + 62, 0x00333333);
+        
+        drivers::Framebuffer::draw_rect(rect.x + 130, rect.y + 40, 24, 18, 0x0000A2C9); // Folder icon (Cyan)
+        drivers::Framebuffer::draw_string("sys", rect.x + 130, rect.y + 62, 0x00333333);
+
+        drivers::Framebuffer::draw_rect(rect.x + 20, rect.y + 90, 20, 24, 0x00E0E0E0); // File icon
+        drivers::Framebuffer::draw_string("hello.txt", rect.x + 12, rect.y + 118, 0x00333333);
+        
+        drivers::Framebuffer::draw_rect(rect.x + 85, rect.y + 90, 20, 24, 0x00E0E0E0); // File icon
+        drivers::Framebuffer::draw_string("info.txt", rect.x + 77, rect.y + 118, 0x00333333);
+    }
 }
 
 void WindowManager::init() {
@@ -157,6 +198,36 @@ Window* WindowManager::create_window(int x, int y, int w, int h, const char* tit
     drivers::Serial::println("\"");
     
     return win;
+}
+
+void WindowManager::close_window(int id) {
+    if (!window_list_head) return;
+    
+    Window* target = nullptr;
+    Window* prev = nullptr;
+    Window* curr = window_list_head;
+    while (curr) {
+        if (curr->id == id) {
+            target = curr;
+            break;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    
+    if (target) {
+        if (prev) {
+            prev->next = target->next;
+        } else {
+            window_list_head = target->next;
+        }
+        
+        if (active_window == target) {
+            active_window = nullptr;
+        }
+        
+        delete target;
+    }
 }
 
 void WindowManager::draw_cursor() {
@@ -271,6 +342,27 @@ void WindowManager::draw_mac_decorations() {
 
     drivers::Framebuffer::draw_rect(612, 716, 36, 36, 0x00FFCC00); // Notes (Yellow)
     drivers::Framebuffer::draw_string("N", 626, 730, 0x00333333);
+
+    // 5. Draw indicator dots under icons if Finder or Terminal windows are open
+    bool finder_running = false;
+    bool terminal_running = false;
+    Window* curr_win = window_list_head;
+    while (curr_win) {
+        const char* t = curr_win->title;
+        if (t[0] == 'F' && t[1] == 'i' && t[2] == 'n' && t[3] == 'd' && t[4] == 'e' && t[5] == 'r' && t[6] == '\0') {
+            finder_running = true;
+        }
+        if (t[0] == 'T' && t[1] == 'e' && t[2] == 'r' && t[3] == 'm' && t[4] == 'i' && t[5] == 'n' && t[6] == 'a' && t[7] == 'l' && t[8] == '\0') {
+            terminal_running = true;
+        }
+        curr_win = curr_win->next;
+    }
+    if (finder_running) {
+        drivers::Framebuffer::draw_rect(348, 753, 4, 2, 0x00333333);
+    }
+    if (terminal_running) {
+        drivers::Framebuffer::draw_rect(516, 753, 4, 2, 0x00333333);
+    }
 }
 
 void WindowManager::draw_desktop() {
@@ -363,19 +455,81 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
         }
 
         if (clicked) {
-            active_window = clicked;
-            active_window->is_dragging = true;
-            drag_offset_x = new_x - active_window->rect.x;
-            drag_offset_y = new_y - active_window->rect.y;
+            // Check Red Close button click
+            if (new_x >= clicked->rect.x + 10 && new_x <= clicked->rect.x + 18 &&
+                new_y >= clicked->rect.y + 8 && new_y <= clicked->rect.y + 16) {
+                close_window(clicked->id);
+                force_redraw_all();
+            }
+            // Check Green Maximize button click
+            else if (new_x >= clicked->rect.x + 38 && new_x <= clicked->rect.x + 46 &&
+                     new_y >= clicked->rect.y + 8 && new_y <= clicked->rect.y + 16) {
+                if (clicked->is_maximized) {
+                    clicked->rect = clicked->orig_rect;
+                    clicked->is_maximized = false;
+                } else {
+                    clicked->orig_rect = clicked->rect;
+                    clicked->rect = { 0, 22, 1024, 680 }; // standard fullscreen below menu bar, above dock
+                    clicked->is_maximized = true;
+                }
+                focus_window(clicked);
+                force_redraw_all();
+            }
+            // Standard focus and drag start
+            else {
+                active_window = clicked;
+                active_window->is_dragging = true;
+                drag_offset_x = new_x - active_window->rect.x;
+                drag_offset_y = new_y - active_window->rect.y;
 
-            // Re-order active window to front of z-order compositor list
-            focus_window(active_window);
-            
-            drivers::Serial::print("[WM] Focus/Drag window: ");
-            drivers::Serial::println(active_window->title);
-            
-            // Full redraw to reflect focus change (active window z-order shift)
-            force_redraw_all();
+                // Re-order active window to front of z-order compositor list
+                focus_window(active_window);
+                
+                drivers::Serial::print("[WM] Focus/Drag window: ");
+                drivers::Serial::println(active_window->title);
+                
+                // Full redraw to reflect focus change (active window z-order shift)
+                force_redraw_all();
+            }
+        }
+        // Check Dock app launching clicks
+        else if (new_y >= 710 && new_y <= 758 && new_x >= 312 && new_x <= 712) {
+            // Finder
+            if (new_x >= 332 && new_x <= 368) {
+                bool open = false;
+                Window* w = window_list_head;
+                while (w) {
+                    const char* t = w->title;
+                    if (t[0] == 'F' && t[1] == 'i' && t[2] == 'n' && t[3] == 'd' && t[4] == 'e' && t[5] == 'r' && t[6] == '\0') {
+                        open = true;
+                        focus_window(w);
+                        break;
+                    }
+                    w = w->next;
+                }
+                if (!open) {
+                    create_window(100, 100, 300, 200, "Finder", 0x00FFFFFF);
+                }
+                force_redraw_all();
+            }
+            // Terminal
+            else if (new_x >= 500 && new_x <= 536) {
+                bool open = false;
+                Window* w = window_list_head;
+                while (w) {
+                    const char* t = w->title;
+                    if (t[0] == 'T' && t[1] == 'e' && t[2] == 'r' && t[3] == 'm' && t[4] == 'i' && t[5] == 'n' && t[6] == 'a' && t[7] == 'l' && t[8] == '\0') {
+                        open = true;
+                        focus_window(w);
+                        break;
+                    }
+                    w = w->next;
+                }
+                if (!open) {
+                    create_window(150, 150, 300, 200, "Terminal", 0x001A1A1A);
+                }
+                force_redraw_all();
+            }
         }
     }
 
@@ -394,6 +548,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
             active_window->rect.y = next_y;
 
             // Enclose old and new window rects AND cursor rects in the unified dirty bounding box
+            // Note: window boundaries are expanded by +4 to encapsulate drop shadows
             int x_min = old_rect.x < next_x ? old_rect.x : next_x;
             if (last_mouse_x < x_min) x_min = last_mouse_x;
             if (mouse_x < x_min) x_min = mouse_x;
@@ -402,14 +557,14 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
             if (last_mouse_y < y_min) y_min = last_mouse_y;
             if (mouse_y < y_min) y_min = mouse_y;
 
-            int old_r = old_rect.x + old_rect.w;
-            int new_r = next_x + active_window->rect.w;
+            int old_r = old_rect.x + old_rect.w + 4;
+            int new_r = next_x + active_window->rect.w + 4;
             int x_max = old_r > new_r ? old_r : new_r;
             if (last_mouse_x + 16 > x_max) x_max = last_mouse_x + 16;
             if (mouse_x + 16 > x_max) x_max = mouse_x + 16;
 
-            int old_b = old_rect.y + old_rect.h;
-            int new_b = next_y + active_window->rect.h;
+            int old_b = old_rect.y + old_rect.h + 4;
+            int new_b = next_y + active_window->rect.h + 4;
             int y_max = old_b > new_b ? old_b : new_b;
             if (last_mouse_y + 16 > y_max) y_max = last_mouse_y + 16;
             if (mouse_y + 16 > y_max) y_max = mouse_y + 16;

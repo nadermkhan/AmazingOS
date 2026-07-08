@@ -11,6 +11,8 @@ class Window {
 public:
     int id;
     Rect rect;
+    Rect orig_rect;
+    bool is_maximized;
     char title[64];
     uint32_t bg_color;
     bool is_dragging;
@@ -40,6 +42,7 @@ private:
 public:
     static void init();
     static Window* create_window(int x, int y, int w, int h, const char* title, uint32_t color);
+    static void close_window(int id);
     static void draw_desktop();
     static void draw_mac_decorations();
     static void force_redraw_all();
