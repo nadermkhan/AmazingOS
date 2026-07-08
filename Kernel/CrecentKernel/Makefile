@@ -17,7 +17,7 @@ TARGET_PE = kernel.exe
 TARGET_ELF = kernel.bin
 
 # Object files mapping
-OBJS = boot.o main.o vga.o serial.o vfs.o
+OBJS = boot.o main.o vga.o serial.o vfs.o gdt.o idt.o apic.o interrupts.o
 
 .PHONY: all clean qemu
 
@@ -46,6 +46,18 @@ serial.o: src/drivers/serial.cpp
 
 vfs.o: src/fs/vfs.cpp
 	$(CXX) $(CXXFLAGS) -c src/fs/vfs.cpp -o vfs.o
+
+gdt.o: src/kernel/gdt.cpp
+	$(CXX) $(CXXFLAGS) -c src/kernel/gdt.cpp -o gdt.o
+
+idt.o: src/kernel/idt.cpp
+	$(CXX) $(CXXFLAGS) -c src/kernel/idt.cpp -o idt.o
+
+apic.o: src/drivers/apic.cpp
+	$(CXX) $(CXXFLAGS) -c src/drivers/apic.cpp -o apic.o
+
+interrupts.o: src/kernel/interrupts.S
+	$(CXX) -c src/kernel/interrupts.S -o interrupts.o
 
 # Clean up build artifacts
 clean:

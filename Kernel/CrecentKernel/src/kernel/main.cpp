@@ -1,6 +1,9 @@
 #include "../drivers/serial.hpp"
 #include "../drivers/vga.hpp"
 #include "../fs/vfs.hpp"
+#include "gdt.hpp"
+#include "idt.hpp"
+#include "../drivers/apic.hpp"
 
 // Define an empty dummy __main function to satisfy MinGW's global constructor initialization stub
 extern "C" void __main() {}
@@ -18,7 +21,29 @@ extern "C" void kmain() {
         drivers::Serial::println("========================================");
     }
 
-    // 2. Initialize VGA text-mode graphics console
+    // 2. Initialize CPU Stacks and Descriptors (GDT & TSS)
+    kernel::gdt_init();
+    if (serial_ok) {
+        drivers::Serial::println("[INIT] GDT and Task State Segment (TSS) loaded.");
+    }
+
+    // 3. Initialize Interrupt Descriptor Table (IDT)
+    kernel::idt_init();
+    if (serial_ok) {
+        drivers::Serial::println("[INIT] IDT and assembly exception handlers loaded.");
+    }
+
+    // 4. Initialize Local APIC and disable legacy PIC
+    bool apic_ok = drivers::Apic::init();
+    if (serial_ok) {
+        if (apic_ok) {
+            drivers::Serial::println("[INIT] Local APIC enabled. Legacy PIC disabled.");
+        } else {
+            drivers::Serial::println("[WARNING] Local APIC not supported. Skipping.");
+        }
+    }
+
+    // 5. Initialize VGA text-mode graphics console
     drivers::Vga::init();
     drivers::Vga::set_color(drivers::VgaColor::LIGHT_CYAN, drivers::VgaColor::BLACK);
     drivers::Vga::println("Welcome to CrecentKernel!");
@@ -30,7 +55,7 @@ extern "C" void kmain() {
         drivers::Serial::println("[INIT] VGA text console initialized.");
     }
 
-    // 3. Initialize Virtual File System
+    // 6. Initialize Virtual File System
     if (!fs::VFS::init()) {
         drivers::Vga::set_color(drivers::VgaColor::RED, drivers::VgaColor::BLACK);
         drivers::Vga::println("[ERROR] Failed to initialize Virtual File System!");
@@ -45,7 +70,7 @@ extern "C" void kmain() {
         drivers::Serial::println("[INIT] VFS root directory '/' registered.");
     }
 
-    // 4. Create and mount a mock file, write test data, and verify by reading back
+    // 7. Create and mount a mock file, write test data, and verify by reading back
     {
         const char* filepath = "/test.txt";
         drivers::Vga::print("[VFS] Creating mock file: ");
@@ -96,7 +121,6 @@ extern "C" void kmain() {
         // Reset file descriptor offset to read back from the beginning
         file.offset = 0;
         char read_buffer[256];
-        // Initialize read buffer to zero
         for (size_t i = 0; i < sizeof(read_buffer); ++i) {
             read_buffer[i] = '\0';
         }
@@ -122,6 +146,37 @@ extern "C" void kmain() {
         }
     }
 
+    // 8. Interrupt & Exception Verification Testing
+    drivers::Vga::println("");
+    drivers::Vga::println("[TEST] Triggering Software Interrupt 0x80...");
+    if (serial_ok) {
+        drivers::Serial::println("[TEST] Triggering Software Interrupt 0x80...");
+    }
+
+    // Trigger vector 0x80 software interrupt
+    __asm__ __volatile__ ("int $0x80");
+
+    drivers::Vga::println("[TEST] Software Interrupt 0x80 returned successfully.");
+    if (serial_ok) {
+        drivers::Serial::println("[TEST] Software Interrupt 0x80 returned successfully.");
+    }
+
+    drivers::Vga::println("");
+    drivers::Vga::println("[TEST] Triggering CPU exception (Divide by Zero)...");
+    if (serial_ok) {
+        drivers::Serial::println("[TEST] Triggering CPU exception (Divide by Zero)...");
+    }
+
+    // Trigger vector 0 CPU exception (divide-by-zero) using inline assembly
+    __asm__ __volatile__ (
+        "mov $0, %%rbx\n\t"
+        "div %%rbx"
+        :
+        :
+        : "rax", "rdx", "rbx"
+    );
+
+    // This block should never be reached
     drivers::Vga::println("");
     drivers::Vga::set_color(drivers::VgaColor::LIGHT_GREEN, drivers::VgaColor::BLACK);
     drivers::Vga::println("Kernel tasks completed successfully. Halting CPU...");
@@ -131,7 +186,6 @@ extern "C" void kmain() {
     }
 
 halt:
-    // Infinite loop executing CPU Hlt
     while (true) {
         __asm__ __volatile__ (
             "cli\n\t"

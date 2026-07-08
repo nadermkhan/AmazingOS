@@ -66,6 +66,16 @@ boot_entry:
     orl $3, %eax       # Present + Writable
     movl %eax, pdpt
 
+    # PDPT[3] -> pd_high (to map 3GB - 4GB region)
+    movl $pd_high, %eax
+    orl $3, %eax       # Present + Writable
+    movl %eax, pdpt+24 # Entry 3 is at offset 24 bytes
+
+    # pd_high[503] -> 0xFEE00000 (Local APIC Base address, 2MB huge page)
+    movl $0xFEE00083, %eax # Present + Writable + Page Size (2MB)
+    movl %eax, pd_high+(503*8)
+    movl $0, pd_high+(503*8)+4
+
     # PD entries -> Map 512 entries of 2MB (Total 1GB identity map)
     movl $0, %ecx
 .map_pd_loop:
@@ -165,6 +175,8 @@ pml4:
 pdpt:
     .skip 4096
 pd:
+    .skip 4096
+pd_high:
     .skip 4096
 
 .align 16
