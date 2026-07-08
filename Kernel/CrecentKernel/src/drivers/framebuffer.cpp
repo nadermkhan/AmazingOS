@@ -128,6 +128,28 @@ void Framebuffer::draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint
     }
 }
 
+void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color, uint8_t alpha) {
+    if (!initialized) return;
+    uint32_t end_x = x + w;
+    uint32_t end_y = y + h;
+    
+    // Clamp to screen limits
+    if (end_x > width) end_x = width;
+    if (end_y > height) end_y = height;
+
+    uint32_t pitch_words = pitch / 4;
+    for (uint32_t cy = y; cy < end_y; ++cy) {
+        uint32_t line_offset = cy * pitch_words;
+        for (uint32_t cx = x; cx < end_x; ++cx) {
+            uint32_t bg = back_buffer[line_offset + cx];
+            // Split and blend Red/Blue and Green components using registers
+            uint32_t rb = ((color & 0xFF00FF) * alpha + (bg & 0xFF00FF) * (255 - alpha)) >> 8;
+            uint32_t g  = ((color & 0x00FF00) * alpha + (bg & 0x00FF00) * (255 - alpha)) >> 8;
+            back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+        }
+    }
+}
+
 void Framebuffer::draw_line(int x0, int y0, int x1, int y1, uint32_t color) {
     int dx = x1 - x0; if (dx < 0) dx = -dx;
     int dy = y1 - y0; if (dy < 0) dy = -dy;

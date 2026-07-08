@@ -32,24 +32,43 @@ Window::Window(int id, int x, int y, int w, int h, const char* title, uint32_t c
 }
 
 void Window::draw() {
-    // 1. Draw outer frame shadow/border (steel gray: 0x00A0A0A0)
-    drivers::Framebuffer::draw_rect(rect.x, rect.y, rect.w, rect.h, 0x00A0A0A0);
+    uint8_t alpha = is_dragging ? 140 : 255;
+    
+    // 1. Draw outer frame border
+    if (is_dragging) {
+        drivers::Framebuffer::draw_rect_alpha(rect.x, rect.y, rect.w, rect.h, 0x00A0A0A0, alpha);
+    } else {
+        drivers::Framebuffer::draw_rect(rect.x, rect.y, rect.w, rect.h, 0x00A0A0A0);
+    }
 
-    // 2. Draw active/inactive title bar (focused: steel blue 0x002A4B7C, default: 0x00555555)
+    // 2. Draw active/inactive title bar
     bool isActive = (WindowManager::get_mouse_x() >= rect.x && WindowManager::get_mouse_x() < rect.x + rect.w &&
                      WindowManager::get_mouse_y() >= rect.y && WindowManager::get_mouse_y() < rect.y + rect.h);
     uint32_t title_bar_color = isActive ? 0x002A4B7C : 0x004A5A6A;
-    drivers::Framebuffer::draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, 18, title_bar_color);
+    if (is_dragging) {
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 2, rect.y + 2, rect.w - 4, 18, title_bar_color, alpha);
+    } else {
+        drivers::Framebuffer::draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, 18, title_bar_color);
+    }
 
-    // 3. Render Title text (white)
+    // 3. Render Title text (always opaque for crisp readability)
     drivers::Framebuffer::draw_string(title, rect.x + 6, rect.y + 7, 0x00FFFFFF);
 
-    // 4. Render Close Button (red widget square)
-    drivers::Framebuffer::draw_rect(rect.x + rect.w - 16, rect.y + 5, 12, 12, 0x00FF3333);
-    drivers::Framebuffer::draw_rect(rect.x + rect.w - 13, rect.y + 8, 6, 6, 0x00FFFFFF); // Inner dot
+    // 4. Render Close Button
+    if (is_dragging) {
+        drivers::Framebuffer::draw_rect_alpha(rect.x + rect.w - 16, rect.y + 5, 12, 12, 0x00FF3333, alpha);
+        drivers::Framebuffer::draw_rect_alpha(rect.x + rect.w - 13, rect.y + 8, 6, 6, 0x00FFFFFF, alpha);
+    } else {
+        drivers::Framebuffer::draw_rect(rect.x + rect.w - 16, rect.y + 5, 12, 12, 0x00FF3333);
+        drivers::Framebuffer::draw_rect(rect.x + rect.w - 13, rect.y + 8, 6, 6, 0x00FFFFFF);
+    }
 
     // 5. Fill Window Client Area (Window background body)
-    drivers::Framebuffer::draw_rect(rect.x + 2, rect.y + 20, rect.w - 4, rect.h - 22, bg_color);
+    if (is_dragging) {
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 2, rect.y + 20, rect.w - 4, rect.h - 22, bg_color, alpha);
+    } else {
+        drivers::Framebuffer::draw_rect(rect.x + 2, rect.y + 20, rect.w - 4, rect.h - 22, bg_color);
+    }
 }
 
 void WindowManager::init() {

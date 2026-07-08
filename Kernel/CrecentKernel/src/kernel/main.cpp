@@ -344,6 +344,19 @@ void gui_demo_thread(void* arg) {
 
         // Poll mouse coordinates
         if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
+            // Apply velocity-sensitive mouse acceleration curve (integer-only approximation)
+            int speed = (m_dx < 0 ? -m_dx : m_dx) + (m_dy < 0 ? -m_dy : m_dy);
+            int scale_num = 10;
+            if (speed < 3) {
+                scale_num = 6;  // 0.6x speed for sub-pixel precision
+            } else if (speed > 12) {
+                scale_num = 22; // 2.2x speed for rapid sweeps
+            } else {
+                scale_num = 6 + (speed - 3) * 16 / 9; // linear interpolation
+            }
+            m_dx = (m_dx * scale_num) / 10;
+            m_dy = (m_dy * scale_num) / 10;
+
             cursor_x += m_dx;
             cursor_y -= m_dy;
             wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
