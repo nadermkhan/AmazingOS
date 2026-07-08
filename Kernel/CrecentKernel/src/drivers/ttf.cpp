@@ -59,17 +59,48 @@ struct FontSizeCache {
     CachedGlyph glyphs[128];
 };
 
-static FontSizeCache size_caches[4] = {};
+static inline float float_abs(float x) { return x < 0.0f ? -x : x; }
+
+#define NUM_SIZE_CACHES 16
+static FontSizeCache size_caches[NUM_SIZE_CACHES] = {};
+
+static void load_glyph_on_demand(FontSizeCache* cache, uint8_t uc) {
+    if (cache->glyphs[uc].active) return;
+    
+    float scale = stbtt_ScaleForPixelHeight(&font_info, cache->size);
+    int w = 0, h = 0, xoff = 0, yoff = 0;
+    unsigned char* bitmap = stbtt_GetCodepointBitmap(&font_info, scale, scale, uc, &w, &h, &xoff, &yoff);
+    
+    int advance_width = 0, left_side_bearing = 0;
+    stbtt_GetCodepointHMetrics(&font_info, uc, &advance_width, &left_side_bearing);
+    
+    cache->glyphs[uc].w = w;
+    cache->glyphs[uc].h = h;
+    cache->glyphs[uc].xoff = xoff;
+    cache->glyphs[uc].yoff = yoff;
+    cache->glyphs[uc].advance_width = (int)(advance_width * scale);
+    
+    if (bitmap && w > 0 && h > 0) {
+        cache->glyphs[uc].bitmap = (uint8_t*)kernel::kmalloc(w * h);
+        if (cache->glyphs[uc].bitmap) {
+            memcpy(cache->glyphs[uc].bitmap, bitmap, w * h);
+        }
+        stbtt_FreeBitmap(bitmap, 0);
+    } else {
+        cache->glyphs[uc].bitmap = nullptr;
+    }
+    cache->glyphs[uc].active = true;
+}
 
 static FontSizeCache* get_or_create_size_cache(float size) {
-    for (int i = 0; i < 4; ++i) {
-        if (size_caches[i].active && size_caches[i].size == size) {
+    for (int i = 0; i < NUM_SIZE_CACHES; ++i) {
+        if (size_caches[i].active && float_abs(size_caches[i].size - size) < 0.01f) {
             return &size_caches[i];
         }
     }
     
     int slot = -1;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < NUM_SIZE_CACHES; ++i) {
         if (!size_caches[i].active) {
             slot = i;
             break;
@@ -94,39 +125,16 @@ static FontSizeCache* get_or_create_size_cache(float size) {
         cache->glyphs[c].bitmap = nullptr;
     }
     
-    float scale = stbtt_ScaleForPixelHeight(&font_info, size);
-    for (int c = 32; c < 128; ++c) {
-        int w, h, xoff, yoff;
-        unsigned char* bitmap = stbtt_GetCodepointBitmap(&font_info, scale, scale, c, &w, &h, &xoff, &yoff);
-        
-        int advance_width, left_side_bearing;
-        stbtt_GetCodepointHMetrics(&font_info, c, &advance_width, &left_side_bearing);
-        
-        cache->glyphs[c].active = true;
-        cache->glyphs[c].w = w;
-        cache->glyphs[c].h = h;
-        cache->glyphs[c].xoff = xoff;
-        cache->glyphs[c].yoff = yoff;
-        cache->glyphs[c].advance_width = (int)(advance_width * scale);
-        
-        if (bitmap && w > 0 && h > 0) {
-            cache->glyphs[c].bitmap = (uint8_t*)kernel::kmalloc(w * h);
-            if (cache->glyphs[c].bitmap) {
-                memcpy(cache->glyphs[c].bitmap, bitmap, w * h);
-            }
-            stbtt_FreeBitmap(bitmap, 0);
-        } else {
-            cache->glyphs[c].bitmap = nullptr;
-        }
-    }
-    
     return cache;
 }
 
 bool TtfRenderer::init() {
     fs::VFSNode* font_node = fs::VFS::open("/tar/inter.ttf");
     if (!font_node) {
-        drivers::Serial::println("[TTF] Error: Failed to open /tar/inter.ttf");
+        font_node = fs::VFS::open("/tar/inter.otf");
+    }
+    if (!font_node) {
+        drivers::Serial::println("[TTF] Error: Failed to open font file (/tar/inter.ttf or /tar/inter.otf)");
         return false;
     }
     
@@ -170,6 +178,10 @@ void TtfRenderer::draw_char(char c, uint32_t x, uint32_t y, uint32_t color, floa
     FontSizeCache* cache = get_or_create_size_cache(size);
     if (!cache) return;
     
+    if (!cache->glyphs[uc].active) {
+        load_glyph_on_demand(cache, uc);
+    }
+    
     CachedGlyph& glyph = cache->glyphs[uc];
     if (!glyph.active || !glyph.bitmap) return;
     
@@ -178,15 +190,27 @@ void TtfRenderer::draw_char(char c, uint32_t x, uint32_t y, uint32_t color, floa
     int xoff = glyph.xoff;
     int yoff = glyph.yoff;
     uint8_t* bitmap = glyph.bitmap;
+
+    int char_left = x + xoff;
+    int char_right = char_left + w;
+    int char_top = y + yoff;
+    int char_bottom = char_top + h;
+    
+    Rect clip = Framebuffer::get_clip_rect();
+    if (char_right <= clip.x || char_left >= clip.x + clip.w ||
+        char_bottom <= clip.y || char_top >= clip.y + clip.h) {
+        return;
+    }
     
     for (int cy = 0; cy < h; ++cy) {
         for (int cx = 0; cx < w; ++cx) {
-            uint8_t alpha = bitmap[cy * w + cx];
-            if (alpha > 0) {
-                uint32_t sx = x + xoff + cx;
-                uint32_t sy = y + yoff + cy;
-                
-                if (sx < Framebuffer::get_width() && sy < Framebuffer::get_height()) {
+            uint32_t sx = x + xoff + cx;
+            uint32_t sy = y + yoff + cy;
+            
+            if (sx >= (uint32_t)clip.x && sx < (uint32_t)(clip.x + clip.w) &&
+                sy >= (uint32_t)clip.y && sy < (uint32_t)(clip.y + clip.h)) {
+                uint8_t alpha = bitmap[cy * w + cx];
+                if (alpha > 0) {
                     uint32_t bg = Framebuffer::get_pixel(sx, sy);
                     uint32_t rb = ((color & 0xFF00FF) * alpha + (bg & 0xFF00FF) * (255 - alpha)) >> 8;
                     uint32_t g  = ((color & 0x00FF00) * alpha + (bg & 0x00FF00) * (255 - alpha)) >> 8;
@@ -213,6 +237,7 @@ void TtfRenderer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
     
     uint32_t cx = x;
     uint32_t cy = y;
+    Rect clip = Framebuffer::get_clip_rect();
     
     while (*str) {
         uint8_t uc = (uint8_t)*str;
@@ -220,6 +245,123 @@ void TtfRenderer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
             cy += (int)((ascent - descent + line_gap) * scale);
             cx = x;
         } else if (uc < 128) {
+            if (!cache->glyphs[uc].active) {
+                load_glyph_on_demand(cache, uc);
+            }
+            CachedGlyph& glyph = cache->glyphs[uc];
+            if (glyph.active) {
+                int w = glyph.w;
+                int h = glyph.h;
+                int xoff = glyph.xoff;
+                int yoff = glyph.yoff;
+                uint8_t* bitmap = glyph.bitmap;
+                uint32_t draw_y = cy + baseline;
+
+                int char_left = cx + xoff;
+                int char_right = char_left + w;
+                int char_top = draw_y + yoff;
+                int char_bottom = char_top + h;
+
+                if (char_right <= clip.x || char_left >= clip.x + clip.w ||
+                    char_bottom <= clip.y || char_top >= clip.y + clip.h) {
+                    cx += glyph.advance_width;
+                    str++;
+                    continue;
+                }
+
+                if (bitmap) {
+                    for (int cy_b = 0; cy_b < h; ++cy_b) {
+                        for (int cx_b = 0; cx_b < w; ++cx_b) {
+                            uint32_t sx = cx + xoff + cx_b;
+                            uint32_t sy = draw_y + yoff + cy_b;
+                            
+                            if (sx >= (uint32_t)clip.x && sx < (uint32_t)(clip.x + clip.w) &&
+                                sy >= (uint32_t)clip.y && sy < (uint32_t)(clip.y + clip.h)) {
+                                uint8_t alpha = bitmap[cy_b * w + cx_b];
+                                if (alpha > 0) {
+                                    uint32_t bg = Framebuffer::get_pixel(sx, sy);
+                                    uint32_t rb = ((color & 0xFF00FF) * alpha + (bg & 0xFF00FF) * (255 - alpha)) >> 8;
+                                    uint32_t g  = ((color & 0x00FF00) * alpha + (bg & 0x00FF00) * (255 - alpha)) >> 8;
+                                    Framebuffer::draw_pixel(sx, sy, (rb & 0xFF00FF) | (g & 0x00FF00));
+                                }
+                            }
+                        }
+                    }
+                }
+                cx += glyph.advance_width;
+                
+                if (*(str + 1)) {
+                    cx += (int)(stbtt_GetCodepointKernAdvance(&font_info, *str, *(str + 1)) * scale);
+                }
+            }
+        }
+        str++;
+    }
+}
+
+void TtfRenderer::draw_char_target(uint32_t* target, int tw, int th, char c, int x, int y, uint32_t color, float size) {
+    if (!initialized || !target) return;
+    
+    uint8_t uc = (uint8_t)c;
+    if (uc > 127) return;
+    
+    FontSizeCache* cache = get_or_create_size_cache(size);
+    if (!cache) return;
+    
+    if (!cache->glyphs[uc].active) {
+        load_glyph_on_demand(cache, uc);
+    }
+    
+    CachedGlyph& glyph = cache->glyphs[uc];
+    if (!glyph.active || !glyph.bitmap) return;
+    
+    int w = glyph.w;
+    int h = glyph.h;
+    int xoff = glyph.xoff;
+    int yoff = glyph.yoff;
+    uint8_t* bitmap = glyph.bitmap;
+    
+    for (int cy = 0; cy < h; ++cy) {
+        for (int cx = 0; cx < w; ++cx) {
+            uint8_t alpha = bitmap[cy * w + cx];
+            if (alpha > 0) {
+                int sx = x + xoff + cx;
+                int sy = y + yoff + cy;
+                
+                if (sx >= 0 && sx < tw && sy >= 0 && sy < th) {
+                    uint32_t bg = target[sy * tw + sx];
+                    uint32_t rb = ((color & 0xFF00FF) * alpha + (bg & 0xFF00FF) * (255 - alpha)) >> 8;
+                    uint32_t g  = ((color & 0x00FF00) * alpha + (bg & 0x00FF00) * (255 - alpha)) >> 8;
+                    target[sy * tw + sx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+                }
+            }
+        }
+    }
+}
+
+void TtfRenderer::draw_string_target(uint32_t* target, int tw, int th, const char* str, int x, int y, uint32_t color, float size) {
+    if (!initialized || !target) return;
+    
+    FontSizeCache* cache = get_or_create_size_cache(size);
+    if (!cache) return;
+    
+    float scale = stbtt_ScaleForPixelHeight(&font_info, size);
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
+    int baseline = (int)(ascent * scale);
+    
+    int cx = x;
+    int cy = y;
+    
+    while (*str) {
+        uint8_t uc = (uint8_t)*str;
+        if (*str == '\n') {
+            cy += (int)((ascent - descent + line_gap) * scale);
+            cx = x;
+        } else if (uc < 128) {
+            if (!cache->glyphs[uc].active) {
+                load_glyph_on_demand(cache, uc);
+            }
             CachedGlyph& glyph = cache->glyphs[uc];
             if (glyph.active) {
                 if (glyph.bitmap) {
@@ -228,20 +370,20 @@ void TtfRenderer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
                     int xoff = glyph.xoff;
                     int yoff = glyph.yoff;
                     uint8_t* bitmap = glyph.bitmap;
-                    uint32_t draw_y = cy + baseline;
+                    int draw_y = cy + baseline;
                     
                     for (int cy_b = 0; cy_b < h; ++cy_b) {
                         for (int cx_b = 0; cx_b < w; ++cx_b) {
                             uint8_t alpha = bitmap[cy_b * w + cx_b];
                             if (alpha > 0) {
-                                uint32_t sx = cx + xoff + cx_b;
-                                uint32_t sy = draw_y + yoff + cy_b;
+                                int sx = cx + xoff + cx_b;
+                                int sy = draw_y + yoff + cy_b;
                                 
-                                if (sx < Framebuffer::get_width() && sy < Framebuffer::get_height()) {
-                                    uint32_t bg = Framebuffer::get_pixel(sx, sy);
+                                if (sx >= 0 && sx < tw && sy >= 0 && sy < th) {
+                                    uint32_t bg = target[sy * tw + sx];
                                     uint32_t rb = ((color & 0xFF00FF) * alpha + (bg & 0xFF00FF) * (255 - alpha)) >> 8;
                                     uint32_t g  = ((color & 0x00FF00) * alpha + (bg & 0x00FF00) * (255 - alpha)) >> 8;
-                                    Framebuffer::draw_pixel(sx, sy, (rb & 0xFF00FF) | (g & 0x00FF00));
+                                    target[sy * tw + sx] = (rb & 0xFF00FF) | (g & 0x00FF00);
                                 }
                             }
                         }
@@ -273,6 +415,9 @@ uint32_t TtfRenderer::get_string_width(const char* str, float size) {
     while (*str) {
         uint8_t uc = (uint8_t)*str;
         if (*str != '\n' && uc < 128) {
+            if (!cache->glyphs[uc].active) {
+                load_glyph_on_demand(cache, uc);
+            }
             CachedGlyph& glyph = cache->glyphs[uc];
             if (glyph.active) {
                 width += glyph.advance_width;

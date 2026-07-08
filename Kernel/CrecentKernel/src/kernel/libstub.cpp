@@ -3,18 +3,63 @@
 extern "C" {
 
 void* memcpy(void* dest, const void* src, size_t n) {
-    char* d = (char*)dest;
-    const char* s = (const char*)src;
-    for (size_t i = 0; i < n; ++i) {
-        d[i] = s[i];
+    if (((uintptr_t)dest % 8 == 0) && ((uintptr_t)src % 8 == 0)) {
+        uint64_t* d64 = (uint64_t*)dest;
+        const uint64_t* s64 = (const uint64_t*)src;
+        size_t n64 = n / 8;
+        for (size_t i = 0; i < n64; ++i) {
+            d64[i] = s64[i];
+        }
+        char* d = (char*)(d64 + n64);
+        const char* s = (const char*)(s64 + n64);
+        size_t rem = n % 8;
+        for (size_t i = 0; i < rem; ++i) {
+            d[i] = s[i];
+        }
+    } else if (((uintptr_t)dest % 4 == 0) && ((uintptr_t)src % 4 == 0)) {
+        uint32_t* d32 = (uint32_t*)dest;
+        const uint32_t* s32 = (const uint32_t*)src;
+        size_t n32 = n / 4;
+        for (size_t i = 0; i < n32; ++i) {
+            d32[i] = s32[i];
+        }
+        char* d = (char*)(d32 + n32);
+        const char* s = (const char*)(s32 + n32);
+        size_t rem = n % 4;
+        for (size_t i = 0; i < rem; ++i) {
+            d[i] = s[i];
+        }
+    } else {
+        char* d = (char*)dest;
+        const char* s = (const char*)src;
+        for (size_t i = 0; i < n; ++i) {
+            d[i] = s[i];
+        }
     }
     return dest;
 }
 
 void* memset(void* s, int c, size_t n) {
     char* p = (char*)s;
-    for (size_t i = 0; i < n; ++i) {
-        p[i] = (char)c;
+    uint8_t val = (uint8_t)c;
+    uint64_t val64 = ((uint64_t)val << 56) | ((uint64_t)val << 48) | ((uint64_t)val << 40) | ((uint64_t)val << 32) |
+                     ((uint64_t)val << 24) | ((uint64_t)val << 16) | ((uint64_t)val << 8) | val;
+                     
+    if ((uintptr_t)s % 8 == 0) {
+        uint64_t* p64 = (uint64_t*)s;
+        size_t n64 = n / 8;
+        for (size_t i = 0; i < n64; ++i) {
+            p64[i] = val64;
+        }
+        p = (char*)(p64 + n64);
+        size_t rem = n % 8;
+        for (size_t i = 0; i < rem; ++i) {
+            p[i] = val;
+        }
+    } else {
+        for (size_t i = 0; i < n; ++i) {
+            p[i] = val;
+        }
     }
     return s;
 }

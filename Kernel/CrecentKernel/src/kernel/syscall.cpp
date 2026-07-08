@@ -3,10 +3,13 @@
 #include "scheduler.hpp"
 #include "../drivers/serial.hpp"
 #include "../drivers/vga.hpp"
+#include "wm.hpp"
+#include "../drivers/ttf.hpp"
 
 extern "C" {
     uint64_t user_rsp_temp = 0;
-    void syscall_handler_entry(); // Declared at namespace scope
+    void syscall_handler_entry();
+    void* memcpy(void* dest, const void* src, size_t n);
 }
 
 namespace kernel {
@@ -109,6 +112,142 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             // Terminate the current user thread
             thread_exit();
             // This case never returns
+            break;
+        }
+
+        case 4: { // sys_create_window
+            int x = (int)frame->rdi;
+            int y = (int)frame->rsi;
+            int w = (int)frame->rdx;
+            int h = (int)frame->r10;
+            const char* title = (const char*)frame->r8;
+            uint32_t color = (uint32_t)frame->r9;
+
+            // Safe strnlen to prevent read overflow Page Faults
+            size_t len = 0;
+            while (len < 64 && title[len]) {
+                len++;
+            }
+
+            if (!syscall_validate_buffer(title, len)) {
+                drivers::Serial::println("[SYSCALL] Security violation: sys_create_window passed invalid title pointer!");
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            wm::Window* win = wm::WindowManager::create_window(x, y, w, h, title, color);
+            if (!win) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            int client_w = w - 2;
+            int client_h = h - 42;
+            if (client_w > 0 && client_h > 0) {
+                win->buffer = new uint32_t[client_w * client_h];
+                for (int i = 0; i < client_w * client_h; i++) {
+                    win->buffer[i] = 0x00FFFFFF;
+                }
+            }
+
+            frame->rax = win->id;
+            break;
+        }
+
+        case 5: { // sys_update_window
+            int win_id = (int)frame->rdi;
+            const uint32_t* user_buf = (const uint32_t*)frame->rsi;
+
+            wm::Window* win = wm::WindowManager::get_window_by_id(win_id);
+            if (!win || !win->buffer) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            int client_w = win->rect.w - 2;
+            int client_h = win->rect.h - 42;
+            size_t size_bytes = client_w * client_h * sizeof(uint32_t);
+
+            if (!syscall_validate_buffer(user_buf, size_bytes)) {
+                drivers::Serial::println("[SYSCALL] Security violation: sys_update_window passed invalid user buffer pointer!");
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            memcpy(win->buffer, user_buf, size_bytes);
+            wm::WindowManager::force_redraw_all();
+
+            frame->rax = 0;
+            break;
+        }
+
+        case 6: { // sys_get_window_event
+            int win_id = (int)frame->rdi;
+            Event* user_ev = (Event*)frame->rsi;
+
+            if (!syscall_validate_buffer(user_ev, sizeof(Event))) {
+                drivers::Serial::println("[SYSCALL] Security violation: sys_get_window_event passed invalid event pointer!");
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            wm::Window* win = wm::WindowManager::get_window_by_id(win_id);
+            if (!win) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            if (win->pending_event.type != 0) {
+                user_ev->type = win->pending_event.type;
+                user_ev->mx = win->pending_event.mx;
+                user_ev->my = win->pending_event.my;
+                user_ev->key = win->pending_event.key;
+
+                win->pending_event.type = 0;
+                frame->rax = 1;
+            } else {
+                frame->rax = 0;
+            }
+            break;
+        }
+
+        case 7: { // sys_draw_string
+            int win_id = (int)frame->rdi;
+            int x = (int)frame->rsi;
+            int y = (int)frame->rdx;
+            uint32_t color = (uint32_t)frame->r10;
+            const char* user_str = (const char*)frame->r8;
+            int size = (int)frame->r9;
+
+            if (size < 6 || size > 72) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            size_t len = 0;
+            while (len < 128 && user_str[len]) {
+                len++;
+            }
+
+            if (!syscall_validate_buffer(user_str, len)) {
+                drivers::Serial::println("[SYSCALL] Security violation: sys_draw_string passed invalid string pointer!");
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            wm::Window* win = wm::WindowManager::get_window_by_id(win_id);
+            if (!win || !win->buffer) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            int client_w = win->rect.w - 2;
+            int client_h = win->rect.h - 42;
+
+            drivers::TtfRenderer::draw_string_target(win->buffer, client_w, client_h, user_str, x, y, color, (float)size);
+            wm::WindowManager::force_redraw_all();
+
+            frame->rax = 0;
             break;
         }
 

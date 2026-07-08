@@ -146,37 +146,135 @@ void user_security_entry() {
     user_exit();
 }
 
+static inline uint64_t user_syscall6(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    register uint64_t r_num __asm__("rax") = num;
+    register uint64_t r_a1  __asm__("rdi") = a1;
+    register uint64_t r_a2  __asm__("rsi") = a2;
+    register uint64_t r_a3  __asm__("rdx") = a3;
+    register uint64_t r_a4  __asm__("r10") = a4;
+    register uint64_t r_a5  __asm__("r8")  = a5;
+    register uint64_t r_a6  __asm__("r9")  = a6;
+
+    __asm__ __volatile__ (
+        "syscall"
+        : "+r"(r_num)
+        : "r"(r_a1), "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a5), "r"(r_a6)
+        : "rcx", "r11", "memory"
+    );
+    return r_num;
+}
+
+static inline uint64_t user_create_window(int x, int y, int w, int h, const char* title, uint32_t color) {
+    return user_syscall6(4, x, y, w, h, (uint64_t)title, color);
+}
+
+static inline uint64_t user_update_window(int win_id, const uint32_t* buf) {
+    return user_syscall6(5, win_id, (uint64_t)buf, 0, 0, 0, 0);
+}
+
+static inline uint64_t user_get_window_event(int win_id, Event* ev) {
+    return user_syscall6(6, win_id, (uint64_t)ev, 0, 0, 0, 0);
+}
+
+static inline uint64_t user_draw_string(int win_id, int x, int y, uint32_t color, const char* str, int size) {
+    return user_syscall6(7, win_id, x, y, color, (uint64_t)str, size);
+}
+
+void user_paint_entry() {
+    char title[6];
+    title[0] = 'P'; title[1] = 'a'; title[2] = 'i'; title[3] = 'n'; title[4] = 't'; title[5] = '\0';
+    
+    int win_id = (int)user_create_window(450, 200, 350, 250, title, 0x00FFFFFF);
+    if (win_id < 0) {
+        user_exit();
+    }
+
+    int client_w = 350 - 2;
+    int client_h = 250 - 42;
+    
+    uint32_t buffer[72384];
+    
+    for (int i = 0; i < 72384; i++) {
+        buffer[i] = 0x00FFFFFF;
+    }
+
+    for (int y = 0; y < 38; y++) {
+        for (int x = 0; x < client_w; x++) {
+            buffer[y * client_w + x] = 0x00F1F5F9; // Sleek slate-light grey header
+        }
+    }
+    for (int x = 0; x < client_w; x++) {
+        buffer[38 * client_w + x] = 0x00E2E8F0; // Divider
+    }
+    
+    user_update_window(win_id, buffer);
+
+    char txt1[13];
+    txt1[0] = 'P'; txt1[1] = 'a'; txt1[2] = 'i'; txt1[3] = 'n'; txt1[4] = 't'; txt1[5] = ' '; 
+    txt1[6] = 'C'; txt1[7] = 'a'; txt1[8] = 'n'; txt1[9] = 'v'; txt1[10] = 'a'; txt1[11] = 's'; txt1[12] = '\0';
+    
+    char txt2[19];
+    txt2[0] = 'C'; txt2[1] = 'l'; txt2[2] = 'i'; txt2[3] = 'c'; txt2[4] = 'k'; txt2[5] = ' ';
+    txt2[6] = 't'; txt2[7] = 'o'; txt2[8] = ' ';
+    txt2[9] = 'd'; txt2[10] = 'r'; txt2[11] = 'a'; txt2[12] = 'w'; txt2[13] = ' ';
+    txt2[14] = 'f'; txt2[15] = 'r'; txt2[16] = 'e'; txt2[17] = 'e'; txt2[18] = '\0';
+
+    user_draw_string(win_id, 15, 8, 0x001E293B, txt1, 16);
+    user_draw_string(win_id, 130, 10, 0x0064748B, txt2, 13);
+
+    while (true) {
+        Event ev;
+        if (user_get_window_event(win_id, &ev)) {
+            if (ev.type == 1) { // EVENT_MOUSE_CLICK
+                int start_y = ev.my - 3;
+                int start_x = ev.mx - 3;
+                for (int dy = 0; dy < 6; dy++) {
+                    int py = start_y + dy;
+                    if (py < 45 || py >= client_h) continue;
+                    for (int dx = 0; dx < 6; dx++) {
+                        int px = start_x + dx;
+                        if (px < 0 || px >= client_w) continue;
+                        buffer[py * client_w + px] = 0x00000000;
+                    }
+                }
+                user_update_window(win_id, buffer);
+                user_draw_string(win_id, 15, 8, 0x001E293B, txt1, 16);
+                user_draw_string(win_id, 130, 10, 0x0064748B, txt2, 13);
+            }
+        }
+        user_yield();
+    }
+}
+
 struct UserBootstrapArgs {
     void (*entry_func)();
     uint64_t code_virt;
     uint64_t stack_virt;
 };
 
-// Kernel thread that allocates User virtual memory and jumps to user space
 void user_bootstrap_thread(void* arg) {
     UserBootstrapArgs* args = (UserBootstrapArgs*)arg;
     void (*entry_func)() = args->entry_func;
     uint64_t code_virt = args->code_virt;
     uint64_t stack_virt = args->stack_virt;
-    delete args; // Clean up parameter structure on kernel slab heap
+    delete args;
 
-    // 1. Allocate physical pages for user space code and stack
     uint64_t code_phys = kernel::pmm_alloc_frame();
-    uint64_t stack_phys = kernel::pmm_alloc_frame();
-
-    // 3. Map pages with PRESENT, WRITABLE, and USER permissions
     kernel::vmm_map_page(code_virt, code_phys, kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_USER);
-    kernel::vmm_map_page(stack_virt, stack_phys, kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_USER);
 
-    // 4. Copy 2048 bytes of entry function code to prevent truncation
+    int stack_pages = 100;
+    for (int i = 0; i < stack_pages; i++) {
+        uint64_t stack_phys = kernel::pmm_alloc_frame();
+        kernel::vmm_map_page(stack_virt + i * 4096, stack_phys, kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_USER);
+    }
+
     char* src = (char*)entry_func;
     char* dest = (char*)code_phys;
     for (size_t i = 0; i < 2048; ++i) {
         dest[i] = src[i];
     }
 
-    // 5. Jump to User Mode (Ring 3)
-    kernel::jump_to_user_mode((void(*)())code_virt, (void*)(stack_virt + 4096));
+    kernel::jump_to_user_mode((void(*)())code_virt, (void*)(stack_virt + stack_pages * 4096));
 }
 
 volatile bool gui_demo_complete = false;
@@ -235,8 +333,9 @@ void gui_demo_thread(void* arg) {
     wm::WindowManager::init();
 
     // 3. Create Windows
-    wm::WindowManager::create_window(100, 120, 320, 200, "System Log", 0x001B2E3C); // Slate Teal
-    wm::WindowManager::create_window(250, 220, 400, 240, "Performance Monitor", 0x002D3748); // Dark Charcoal
+    wm::WindowManager::create_window(150, 150, 600, 380, "System Log", 0x001B2E3C); // Slate Teal
+    wm::WindowManager::create_window(800, 200, 500, 350, "Performance Monitor", 0x002D3748); // Dark Charcoal
+    wm::WindowManager::create_window(350, 300, 500, 420, "System Settings", 0x00FFFFFF); // Customizer Window
 
     // Draw initial desktop frame
     wm::WindowManager::force_redraw_all();
@@ -255,8 +354,8 @@ void gui_demo_thread(void* arg) {
     int cursor_x = 100;
     int cursor_y = 100;
 
-    // Simulate mouse move to (150, 130) inside the title bar of win1
-    drivers::Ps2::inject_mouse_event(50, -30, false, false);
+    // Simulate mouse move to (150, 160) inside the title bar of win1
+    drivers::Ps2::inject_mouse_event(50, -60, false, false);
 
     // First poll tick
     int m_dx = 0, m_dy = 0;
@@ -346,24 +445,47 @@ void gui_demo_thread(void* arg) {
     while (true) {
         uint64_t start_time = rdtsc();
 
-        // Poll mouse coordinates
-        if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
-            // Apply velocity-sensitive mouse acceleration curve (integer-only approximation)
-            int speed = (m_dx < 0 ? -m_dx : m_dx) + (m_dy < 0 ? -m_dy : m_dy);
+        // Poll mouse coordinates (drain the hardware queue completely before handling)
+        int accum_dx = 0;
+        int accum_dy = 0;
+        bool any_left = false;
+        bool any_right = false;
+        bool got_packet = false;
+        int last_dx = 0;
+        int last_dy = 0;
+        
+        while (drivers::Ps2::poll_mouse(last_dx, last_dy, m_left, m_right)) {
+            accum_dx += last_dx;
+            accum_dy += last_dy;
+            any_left = m_left;
+            any_right = m_right;
+            got_packet = true;
+        }
+
+        if (got_packet) {
+            int speed = (accum_dx < 0 ? -accum_dx : accum_dx) + (accum_dy < 0 ? -accum_dy : accum_dy);
             int scale_num = 10;
             if (speed < 4) {
-                scale_num = 4;  // 0.4x speed for fine target precision
+                scale_num = 4;
             } else if (speed > 16) {
-                scale_num = 14; // 1.4x speed for fast sweeps (prevents jumps)
+                scale_num = 14;
             } else {
-                scale_num = 4 + (speed - 4) / 2; // linear interpolation
+                scale_num = 4 + (speed - 4) / 2;
             }
-            m_dx = (m_dx * scale_num) / 10;
-            m_dy = (m_dy * scale_num) / 10;
+            accum_dx = (accum_dx * scale_num) / 10;
+            accum_dy = (accum_dy * scale_num) / 10;
 
-            cursor_x += m_dx;
-            cursor_y -= m_dy;
-            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left, m_right);
+            cursor_x += accum_dx;
+            cursor_y -= accum_dy;
+
+            int width = drivers::Framebuffer::get_width();
+            int height = drivers::Framebuffer::get_height();
+            if (cursor_x < 0) cursor_x = 0;
+            if (cursor_x >= width) cursor_x = width - 1;
+            if (cursor_y < 0) cursor_y = 0;
+            if (cursor_y >= height) cursor_y = height - 1;
+
+            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, any_left, any_right);
         }
         
         // Poll keyboard characters
@@ -373,6 +495,8 @@ void gui_demo_thread(void* arg) {
             drivers::Serial::print(str);
             drivers::Serial::println("'");
 
+            wm::WindowManager::handle_key_press(key_char);
+
             // Exit requested by typing 'q'
             if (key_char == 'q' || key_char == 'Q') {
                 drivers::Serial::println("[DEMO] Exit requested. Triggering final tests...");
@@ -380,6 +504,7 @@ void gui_demo_thread(void* arg) {
             }
         }
 
+        wm::WindowManager::tick();
         wm::WindowManager::draw_desktop();
         
         // Wait out the remainder of our 16.6ms budget via low-power hlt context yields
@@ -469,6 +594,7 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         uint32_t fb_pitch = 1024 * 4;
         uint8_t fb_bpp = 32;
         bool fb_detected = false;
+        bool is_bga = false;
 
         uint32_t mb_flags = *(uint32_t*)maddr;
         if (mb_flags & (1 << 11)) {
@@ -487,8 +613,7 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
             if (bga_fb) {
                 fb_phys = bga_fb;
                 fb_detected = true;
-                // Setup BGA graphics registers to 1024x768x32
-                drivers::Framebuffer::setup_bga(1024, 768, 32);
+                is_bga = true;
                 if (serial_ok) {
                     drivers::Serial::println("[INIT] Graphical Framebuffer fallback: Bochs/QEMU BGA detected via PCI.");
                 }
@@ -500,6 +625,15 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         }
 
         if (fb_detected) {
+            if (is_bga) {
+                // Setup BGA graphics registers to 1920x1080x32
+                drivers::Framebuffer::setup_bga(1920, 1080, 32);
+                fb_width = 1920;
+                fb_height = 1080;
+                fb_pitch = 1920 * 4;
+                fb_bpp = 32;
+            }
+
             bool fb_ok = drivers::Framebuffer::init(fb_phys, fb_width, fb_height, fb_pitch, fb_bpp);
             if (serial_ok) {
                 if (fb_ok) {
@@ -915,6 +1049,10 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         // Spawn User Space Security verification thread (verifies kernel address protection)
         UserBootstrapArgs* u_args2 = new UserBootstrapArgs{user_security_entry, 0x500000000ULL, 0x500001000ULL};
         kernel::thread_create(user_bootstrap_thread, u_args2);
+
+        // Spawn GUI User Space Paint Thread (Ring 3)
+        UserBootstrapArgs* u_args3 = new UserBootstrapArgs{user_paint_entry, 0x600000000ULL, 0x600100000ULL};
+        kernel::thread_create(user_bootstrap_thread, u_args3);
 
         // Spawn GUI Window Compositor demo thread
         kernel::thread_create(gui_demo_thread, nullptr);

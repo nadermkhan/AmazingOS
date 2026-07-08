@@ -6,7 +6,7 @@ OBJCOPY = objcopy
 # Freestanding C++ compilation flags
 CXXFLAGS = -O2 -std=c++20 -ffreestanding -fno-exceptions -fno-rtti \
            -fno-asynchronous-unwind-tables -fno-unwind-tables \
-           -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
+           -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-stack-arg-probe \
            -Wall -Wextra -Isrc
 
 # Linker flags to build a raw freestanding PE32+ image with custom entry point
@@ -104,4 +104,4 @@ clean:
 
 # Launch emulator target
 qemu: $(TARGET_ELF)
-	qemu-system-x86_64 -kernel $(TARGET_ELF) -serial stdio
+	qemu-system-x86_64 -kernel $(TARGET_ELF) -initrd test.tar -serial stdio

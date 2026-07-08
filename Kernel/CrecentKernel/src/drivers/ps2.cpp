@@ -110,16 +110,13 @@ void Ps2::init() {
     write_cmd(0x20);
     uint8_t ccb = read_data();
     
-    // Enable mouse interrupt (bit 1), keyboard interrupt (bit 0)
-    // Enable clock lines (clear bits 4 and 5)
-    ccb |= 0x03;
+    // Disable interrupts first to prevent partial packet delivery during config
+    ccb &= ~0x03;
     ccb &= ~0x30;
-    
-    // 3. Write modified CCB back
     write_cmd(0x60);
     write_data(ccb);
     
-    // 4. Reset mouse device to ensure standard reporting mode
+    // 3. Reset mouse device to ensure standard reporting mode
     write_cmd(0xD4); // Redirect next write to mouse
     write_data(0xFF); // Reset Command
     uint8_t ack = read_data();
@@ -129,34 +126,39 @@ void Ps2::init() {
     (void)self_test;
     (void)dev_id;
     
-    // 5. Load default mouse configurations
+    // 4. Load default mouse configurations
     write_cmd(0xD4);
     write_data(0xF6); // Set defaults
     read_data(); // ACK
     
-    // 6. Enable data streaming
+    // 5. Enable data streaming
     write_cmd(0xD4); // Redirect next write to auxiliary mouse device
     write_data(0xF4); // Enable mouse reporting
-    
     uint8_t stream_ack = read_data();
-    if (stream_ack == 0xFA) {
-        Serial::println("[INIT] PS/2 Mouse data streaming enabled successfully.");
-    } else {
-        Serial::print("[INIT] WARNING: PS/2 Mouse streaming ACK failed: ");
-        char buf[8];
-        buf[0] = "0123456789ABCDEF"[(stream_ack >> 4) & 0x0F];
-        buf[1] = "0123456789ABCDEF"[stream_ack & 0x0F];
-        buf[2] = '\0';
-        Serial::println(buf);
-    }
+    (void)stream_ack;
 
-    // 7. Flush any leftover command bytes or responses from buffers
+    // 6. Flush any leftover command bytes or responses from buffers
     while (inb(PS2_STATUS_PORT) & 1) {
         inb(PS2_DATA_PORT);
     }
+
+    mouse_cycle = 0;
+
+    // 7. Finally, enable keyboard & mouse interrupts in CCB
+    ccb |= 0x03;
+    write_cmd(0x60);
+    write_data(ccb);
+    Serial::println("[INIT] PS/2 Mouse data streaming enabled successfully.");
 }
 
 void Ps2::handle_keyboard_interrupt() {
+    uint8_t status = inb(PS2_STATUS_PORT);
+    if (status & 0x20) {
+        // Redirect auxiliary data to mouse ISR
+        handle_mouse_interrupt();
+        return;
+    }
+    
     uint8_t scancode = inb(PS2_DATA_PORT);
     
     // Ignore key release events (which have bit 7 set, i.e. >= 0x80)
@@ -175,6 +177,13 @@ void Ps2::handle_keyboard_interrupt() {
 }
 
 void Ps2::handle_mouse_interrupt() {
+    uint8_t status = inb(PS2_STATUS_PORT);
+    if (!(status & 0x20)) {
+        // Discard keyboard byte if it was incorrectly routed to mouse ISR
+        inb(PS2_DATA_PORT);
+        return;
+    }
+
     uint8_t b = inb(PS2_DATA_PORT);
     
     if (mouse_cycle == 0) {
@@ -190,18 +199,9 @@ void Ps2::handle_mouse_interrupt() {
         mouse_bytes[2] = b;
         mouse_cycle = 0;
         
-        // Extract deltas from bytes
-        int dx = (int)mouse_bytes[1];
-        int dy = (int)mouse_bytes[2];
-        
-        // Sign-extend X delta (Bit 4 of byte 0)
-        if (mouse_bytes[0] & 0x10) {
-            dx -= 256;
-        }
-        // Sign-extend Y delta (Bit 5 of byte 0)
-        if (mouse_bytes[0] & 0x20) {
-            dy -= 256;
-        }
+        // Extract deltas from bytes using standard signed cast to prevent overflow or sign extension bugs
+        int dx = (int8_t)mouse_bytes[1];
+        int dy = (int8_t)mouse_bytes[2];
         
         // Accumulate relative movement values
         mouse_dx += dx;

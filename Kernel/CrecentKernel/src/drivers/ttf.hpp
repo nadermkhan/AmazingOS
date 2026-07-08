@@ -13,6 +13,8 @@ public:
     static bool init();
     static void draw_char(char c, uint32_t x, uint32_t y, uint32_t color, float size);
     static void draw_string(const char* str, uint32_t x, uint32_t y, uint32_t color, float size);
+    static void draw_char_target(uint32_t* target, int tw, int th, char c, int x, int y, uint32_t color, float size);
+    static void draw_string_target(uint32_t* target, int tw, int th, const char* str, int x, int y, uint32_t color, float size);
     static uint32_t get_string_width(const char* str, float size);
     static bool is_initialized() { return initialized; }
 };

@@ -21,3 +21,10 @@ typedef signed long long   intptr_t;
 
 // Null pointer type
 typedef decltype(nullptr)  nullptr_t;
+
+// Window event types
+struct Event {
+    int type;
+    int mx, my;
+    char key;
+};
