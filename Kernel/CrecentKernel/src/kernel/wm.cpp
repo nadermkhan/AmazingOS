@@ -397,6 +397,10 @@ bool WindowManager::in_rect(int px, int py, const Rect& r) {
 // Drawing helpers
 // ---------------------------------------------------------------------------
 void WindowManager::draw_window_shadow(const Rect& r, bool active, uint8_t alpha) {
+    // Skip shadow on the actively dragged window for speed
+    bool drag_in_progress = (active_window && active_window->is_dragging);
+    if (active && drag_in_progress) return;
+
     int shadow_size = active ? 24 : 12;
     int step = active ? 4 : 2;
     bool dragging = (alpha < 255);
@@ -1233,14 +1237,11 @@ void Window::draw(bool is_active) {
     bool is_terminal = this->title_is("Terminal");
     WindowManager::draw_window_body(this, alpha, is_terminal);
 
-    bool drag_in_progress = (WindowManager::active_window && WindowManager::active_window->is_dragging);
-    
-    if (drag_in_progress) {
-        if (this->is_dragging) {
-            int cx = rect.x + rect.w / 2;
-            int cy = rect.y + rect.h / 2;
-            WindowManager::draw_string("Moving...", cx - 30, cy, C_TEXT, 13.0f);
-        }
+    if (this->is_dragging) {
+        // Only the actively dragged window shows simplified content
+        int cx = rect.x + rect.w / 2;
+        int cy = rect.y + rect.h / 2;
+        WindowManager::draw_string("Moving...", cx - 30, cy, C_TEXT, 13.0f);
     } else {
         if (is_terminal) {
             WindowManager::draw_terminal_content(this);
@@ -2913,30 +2914,26 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                 active_window->rect.x = next_x;
                 active_window->rect.y = next_y;
 
-                int x_min = old_rect.x < next_x ? old_rect.x : next_x;
-                int y_min = old_rect.y < next_y ? old_rect.y : next_y;
-                int x_max = (old_rect.x + old_rect.w > next_x + active_window->rect.w) ? old_rect.x + old_rect.w : next_x + active_window->rect.w;
-                int y_max = (old_rect.y + old_rect.h > next_y + active_window->rect.h) ? old_rect.y + old_rect.h : next_y + active_window->rect.h;
+                // Dual disjoint dirty rectangles: old position (restore bg) + new position (draw window)
+                Rect old_dirty = {old_rect.x - 32, old_rect.y - 32, old_rect.w + 64, old_rect.h + 64};
+                Rect new_dirty = {next_x - 32, next_y - 32, active_window->rect.w + 64, active_window->rect.h + 64};
 
-                x_min -= 32; y_min -= 32;
-                x_max += 32; y_max += 32;
+                // Clamp to screen bounds
+                if (old_dirty.x < 0) { old_dirty.w += old_dirty.x; old_dirty.x = 0; }
+                if (old_dirty.y < 0) { old_dirty.h += old_dirty.y; old_dirty.y = 0; }
+                if (old_dirty.x + old_dirty.w > width) old_dirty.w = width - old_dirty.x;
+                if (old_dirty.y + old_dirty.h > height) old_dirty.h = height - old_dirty.y;
 
-                if (old_x < x_min) x_min = old_x;
-                if (mouse_x < x_min) x_min = mouse_x;
-                if (old_y < y_min) y_min = old_y;
-                if (mouse_y < y_min) y_min = mouse_y;
-                if (old_x + 16 > x_max) x_max = old_x + 16;
-                if (mouse_x + 16 > x_max) x_max = mouse_x + 16;
-                if (old_y + 16 > y_max) y_max = old_y + 16;
-                if (mouse_y + 16 > y_max) y_max = mouse_y + 16;
+                if (new_dirty.x < 0) { new_dirty.w += new_dirty.x; new_dirty.x = 0; }
+                if (new_dirty.y < 0) { new_dirty.h += new_dirty.y; new_dirty.y = 0; }
+                if (new_dirty.x + new_dirty.w > width) new_dirty.w = width - new_dirty.x;
+                if (new_dirty.y + new_dirty.h > height) new_dirty.h = height - new_dirty.y;
 
-                if (x_min < 0) x_min = 0;
-                if (y_min < 0) y_min = 0;
-                if (x_max > width) x_max = width;
-                if (y_max > height) y_max = height;
+                redraw_dirty_rect(old_dirty);
+                redraw_dirty_rect(new_dirty);
 
-                dirty = {x_min, y_min, x_max - x_min, y_max - y_min};
-                needs_redraw = true;
+                needs_redraw = false;
+                state_updated = true;
             }
         } else if (dragged_desktop_item_idx != -1) {
             DiskItem& it = desktop_items[dragged_desktop_item_idx];

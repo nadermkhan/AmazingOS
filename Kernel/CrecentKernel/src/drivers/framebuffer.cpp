@@ -167,7 +167,7 @@ void Framebuffer::draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint
 }
 
 void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color, uint8_t alpha) {
-    if (!initialized) return;
+    if (!initialized || alpha == 0) return;
     
     int start_x = (int)x;
     int start_y = (int)y;
@@ -184,17 +184,23 @@ void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h
     uint32_t pitch_words = pitch / 4;
     for (int cy = start_y; cy < end_y; ++cy) {
         uint32_t line_offset = cy * pitch_words;
-        for (int cx = start_x; cx < end_x; ++cx) {
-            uint32_t bg = back_buffer[line_offset + cx];
-            uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
-            uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
-            back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+        if (alpha == 255) {
+            for (int cx = start_x; cx < end_x; ++cx) {
+                back_buffer[line_offset + cx] = color;
+            }
+        } else {
+            for (int cx = start_x; cx < end_x; ++cx) {
+                uint32_t bg = back_buffer[line_offset + cx];
+                uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
+                uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
+                back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+            }
         }
     }
 }
 
 void Framebuffer::draw_rounded_rect_alpha(int x, int y, int w, int h, int r, uint32_t color, uint8_t alpha) {
-    if (!initialized) return;
+    if (!initialized || alpha == 0) return;
     
     int start_y = y < clip_rect.y ? clip_rect.y : y;
     int end_y = (y + h) > (clip_rect.y + clip_rect.h) ? (clip_rect.y + clip_rect.h) : (y + h);
@@ -232,11 +238,17 @@ void Framebuffer::draw_rounded_rect_alpha(int x, int y, int w, int h, int r, uin
         if (start_x > end_x) continue;
 
         uint32_t line_offset = cy * pitch_words;
-        for (int cx = start_x; cx <= end_x; ++cx) {
-            uint32_t bg = back_buffer[line_offset + cx];
-            uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
-            uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
-            back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+        if (alpha == 255) {
+            for (int cx = start_x; cx <= end_x; ++cx) {
+                back_buffer[line_offset + cx] = color;
+            }
+        } else {
+            for (int cx = start_x; cx <= end_x; ++cx) {
+                uint32_t bg = back_buffer[line_offset + cx];
+                uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
+                uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
+                back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+            }
         }
     }
 }
@@ -270,7 +282,7 @@ void Framebuffer::draw_circle_filled(int xc, int yc, int r, uint32_t color) {
 }
 
 void Framebuffer::draw_circle_filled_alpha(int xc, int yc, int r, uint32_t color, uint8_t alpha) {
-    if (!initialized) return;
+    if (!initialized || alpha == 0) return;
     int r2 = r * r;
     int start_y = (yc - r) < clip_rect.y ? clip_rect.y : (yc - r);
     int end_y = (yc + r) > (clip_rect.y + clip_rect.h - 1) ? (clip_rect.y + clip_rect.h - 1) : (yc + r);
@@ -291,11 +303,17 @@ void Framebuffer::draw_circle_filled_alpha(int xc, int yc, int r, uint32_t color
         if (start_x > end_x) continue;
         
         uint32_t line_offset = cy * pitch_words;
-        for (int cx = start_x; cx <= end_x; ++cx) {
-            uint32_t bg = back_buffer[line_offset + cx];
-            uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
-            uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
-            back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+        if (alpha == 255) {
+            for (int cx = start_x; cx <= end_x; ++cx) {
+                back_buffer[line_offset + cx] = color;
+            }
+        } else {
+            for (int cx = start_x; cx <= end_x; ++cx) {
+                uint32_t bg = back_buffer[line_offset + cx];
+                uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
+                uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
+                back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
+            }
         }
     }
 }
