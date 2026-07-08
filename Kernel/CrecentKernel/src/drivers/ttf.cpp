@@ -46,10 +46,87 @@ uint8_t* TtfRenderer::font_buffer = nullptr;
 bool TtfRenderer::initialized = false;
 static stbtt_fontinfo font_info;
 
+struct CachedGlyph {
+    bool active;
+    int w, h, xoff, yoff;
+    int advance_width;
+    uint8_t* bitmap;
+};
+
+struct FontSizeCache {
+    float size;
+    bool active;
+    CachedGlyph glyphs[128];
+};
+
+static FontSizeCache size_caches[4] = {};
+
+static FontSizeCache* get_or_create_size_cache(float size) {
+    for (int i = 0; i < 4; ++i) {
+        if (size_caches[i].active && size_caches[i].size == size) {
+            return &size_caches[i];
+        }
+    }
+    
+    int slot = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (!size_caches[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    
+    if (slot == -1) {
+        slot = 0;
+        for (int c = 0; c < 128; ++c) {
+            if (size_caches[slot].glyphs[c].active && size_caches[slot].glyphs[c].bitmap) {
+                kernel::kfree(size_caches[slot].glyphs[c].bitmap);
+            }
+        }
+        size_caches[slot].active = false;
+    }
+    
+    FontSizeCache* cache = &size_caches[slot];
+    cache->size = size;
+    cache->active = true;
+    for (int c = 0; c < 128; ++c) {
+        cache->glyphs[c].active = false;
+        cache->glyphs[c].bitmap = nullptr;
+    }
+    
+    float scale = stbtt_ScaleForPixelHeight(&font_info, size);
+    for (int c = 32; c < 128; ++c) {
+        int w, h, xoff, yoff;
+        unsigned char* bitmap = stbtt_GetCodepointBitmap(&font_info, scale, scale, c, &w, &h, &xoff, &yoff);
+        
+        int advance_width, left_side_bearing;
+        stbtt_GetCodepointHMetrics(&font_info, c, &advance_width, &left_side_bearing);
+        
+        cache->glyphs[c].active = true;
+        cache->glyphs[c].w = w;
+        cache->glyphs[c].h = h;
+        cache->glyphs[c].xoff = xoff;
+        cache->glyphs[c].yoff = yoff;
+        cache->glyphs[c].advance_width = (int)(advance_width * scale);
+        
+        if (bitmap && w > 0 && h > 0) {
+            cache->glyphs[c].bitmap = (uint8_t*)kernel::kmalloc(w * h);
+            if (cache->glyphs[c].bitmap) {
+                memcpy(cache->glyphs[c].bitmap, bitmap, w * h);
+            }
+            stbtt_FreeBitmap(bitmap, 0);
+        } else {
+            cache->glyphs[c].bitmap = nullptr;
+        }
+    }
+    
+    return cache;
+}
+
 bool TtfRenderer::init() {
-    fs::VFSNode* font_node = fs::VFS::open("/tar/arial.ttf");
+    fs::VFSNode* font_node = fs::VFS::open("/tar/inter.ttf");
     if (!font_node) {
-        drivers::Serial::println("[TTF] Error: Failed to open /tar/arial.ttf");
+        drivers::Serial::println("[TTF] Error: Failed to open /tar/inter.ttf");
         return false;
     }
     
@@ -77,7 +154,7 @@ bool TtfRenderer::init() {
     }
     
     initialized = true;
-    drivers::Serial::println("[INIT] TrueType Font Renderer initialized successfully with Arial.");
+    drivers::Serial::println("[INIT] TrueType Font Renderer initialized successfully with Inter.");
     return true;
 }
 
@@ -87,10 +164,20 @@ void TtfRenderer::draw_char(char c, uint32_t x, uint32_t y, uint32_t color, floa
         return;
     }
     
-    float scale = stbtt_ScaleForPixelHeight(&font_info, size);
-    int w, h, xoff, yoff;
-    unsigned char* bitmap = stbtt_GetCodepointBitmap(&font_info, scale, scale, c, &w, &h, &xoff, &yoff);
-    if (!bitmap) return;
+    uint8_t uc = (uint8_t)c;
+    if (uc > 127) return;
+    
+    FontSizeCache* cache = get_or_create_size_cache(size);
+    if (!cache) return;
+    
+    CachedGlyph& glyph = cache->glyphs[uc];
+    if (!glyph.active || !glyph.bitmap) return;
+    
+    int w = glyph.w;
+    int h = glyph.h;
+    int xoff = glyph.xoff;
+    int yoff = glyph.yoff;
+    uint8_t* bitmap = glyph.bitmap;
     
     for (int cy = 0; cy < h; ++cy) {
         for (int cx = 0; cx < w; ++cx) {
@@ -108,8 +195,6 @@ void TtfRenderer::draw_char(char c, uint32_t x, uint32_t y, uint32_t color, floa
             }
         }
     }
-    
-    stbtt_FreeBitmap(bitmap, 0);
 }
 
 void TtfRenderer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t color, float size) {
@@ -118,28 +203,55 @@ void TtfRenderer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
         return;
     }
     
+    FontSizeCache* cache = get_or_create_size_cache(size);
+    if (!cache) return;
+    
     float scale = stbtt_ScaleForPixelHeight(&font_info, size);
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
-    
     int baseline = (int)(ascent * scale);
     
     uint32_t cx = x;
     uint32_t cy = y;
     
     while (*str) {
+        uint8_t uc = (uint8_t)*str;
         if (*str == '\n') {
             cy += (int)((ascent - descent + line_gap) * scale);
             cx = x;
-        } else {
-            int advance_width, left_side_bearing;
-            stbtt_GetCodepointHMetrics(&font_info, *str, &advance_width, &left_side_bearing);
-            
-            draw_char(*str, cx, cy + baseline, color, size);
-            cx += (int)(advance_width * scale);
-            
-            if (*(str + 1)) {
-                cx += (int)(stbtt_GetCodepointKernAdvance(&font_info, *str, *(str + 1)) * scale);
+        } else if (uc < 128) {
+            CachedGlyph& glyph = cache->glyphs[uc];
+            if (glyph.active) {
+                if (glyph.bitmap) {
+                    int w = glyph.w;
+                    int h = glyph.h;
+                    int xoff = glyph.xoff;
+                    int yoff = glyph.yoff;
+                    uint8_t* bitmap = glyph.bitmap;
+                    uint32_t draw_y = cy + baseline;
+                    
+                    for (int cy_b = 0; cy_b < h; ++cy_b) {
+                        for (int cx_b = 0; cx_b < w; ++cx_b) {
+                            uint8_t alpha = bitmap[cy_b * w + cx_b];
+                            if (alpha > 0) {
+                                uint32_t sx = cx + xoff + cx_b;
+                                uint32_t sy = draw_y + yoff + cy_b;
+                                
+                                if (sx < Framebuffer::get_width() && sy < Framebuffer::get_height()) {
+                                    uint32_t bg = Framebuffer::get_pixel(sx, sy);
+                                    uint32_t rb = ((color & 0xFF00FF) * alpha + (bg & 0xFF00FF) * (255 - alpha)) >> 8;
+                                    uint32_t g  = ((color & 0x00FF00) * alpha + (bg & 0x00FF00) * (255 - alpha)) >> 8;
+                                    Framebuffer::draw_pixel(sx, sy, (rb & 0xFF00FF) | (g & 0x00FF00));
+                                }
+                            }
+                        }
+                    }
+                }
+                cx += glyph.advance_width;
+                
+                if (*(str + 1)) {
+                    cx += (int)(stbtt_GetCodepointKernAdvance(&font_info, *str, *(str + 1)) * scale);
+                }
             }
         }
         str++;
@@ -153,16 +265,20 @@ uint32_t TtfRenderer::get_string_width(const char* str, float size) {
         return len * 8;
     }
     
+    FontSizeCache* cache = get_or_create_size_cache(size);
+    if (!cache) return 0;
+    
     float scale = stbtt_ScaleForPixelHeight(&font_info, size);
     uint32_t width = 0;
     while (*str) {
-        if (*str != '\n') {
-            int advance_width, left_side_bearing;
-            stbtt_GetCodepointHMetrics(&font_info, *str, &advance_width, &left_side_bearing);
-            width += (int)(advance_width * scale);
-            
-            if (*(str + 1)) {
-                width += (int)(stbtt_GetCodepointKernAdvance(&font_info, *str, *(str + 1)) * scale);
+        uint8_t uc = (uint8_t)*str;
+        if (*str != '\n' && uc < 128) {
+            CachedGlyph& glyph = cache->glyphs[uc];
+            if (glyph.active) {
+                width += glyph.advance_width;
+                if (*(str + 1)) {
+                    width += (int)(stbtt_GetCodepointKernAdvance(&font_info, *str, *(str + 1)) * scale);
+                }
             }
         }
         str++;
