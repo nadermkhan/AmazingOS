@@ -1,0 +1,17 @@
+# Object files
+*.o
+
+# Linker map files / debugging databases
+*.map
+*.pdb
+
+# Build output executables
+*.exe
+*.bin
+
+# Emulation logs
+*.log
+
+# System files
+.DS_Store
+Thumbs.db
