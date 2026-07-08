@@ -247,20 +247,11 @@ void Framebuffer::swap_dirty_rect_fast(Rect r) {
         uint32_t line_offset = y * pitch_words;
         uint32_t* src = &back_buffer[line_offset + x0];
         uint32_t* dest = &virtual_base[line_offset + x0];
-        
-        // Fast row-level block copy using uint64_t transfers (2 pixels per instruction)
         uint32_t words_to_copy = x1 - x0;
-        uint32_t quads_to_copy = words_to_copy / 2;
-        uint64_t* src_q = (uint64_t*)src;
-        uint64_t* dest_q = (uint64_t*)dest;
         
-        for (uint32_t i = 0; i < quads_to_copy; ++i) {
-            dest_q[i] = src_q[i];
-        }
-        
-        // Copy leftover pixel if width was odd
-        if (words_to_copy % 2) {
-            dest[words_to_copy - 1] = src[words_to_copy - 1];
+        // Strictly 32-bit aligned MMIO write transfers (guaranteed safe on PCI bus)
+        for (uint32_t i = 0; i < words_to_copy; ++i) {
+            dest[i] = src[i];
         }
     }
 }
