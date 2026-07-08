@@ -1,6 +1,8 @@
 #include "idt.hpp"
 #include "../drivers/vga.hpp"
 #include "../drivers/serial.hpp"
+#include "../drivers/apic.hpp"
+#include "scheduler.hpp"
 
 // Table of 256 handler pointers generated in assembly
 extern "C" void* isr_stub_table[256];
@@ -170,14 +172,21 @@ extern "C" __attribute__((sysv_abi)) void interrupt_handler(InterruptFrame* fram
             __asm__ __volatile__ ("hlt");
         }
     } else {
-        // Log interrupt (IRQs and software interrupts)
-        drivers::Serial::print("[INT] Captured Interrupt Vector: ");
-        serial_print_hex(frame->int_no);
-        drivers::Serial::println("");
+        if (frame->int_no == 32) {
+            // Acknowledge the hardware interrupt by writing EOI to the Local APIC
+            drivers::Apic::eoi();
+            // Invoke the scheduler to switch thread context
+            kernel::schedule();
+        } else {
+            // Log interrupt (IRQs and software interrupts)
+            drivers::Serial::print("[INT] Captured Interrupt Vector: ");
+            serial_print_hex(frame->int_no);
+            drivers::Serial::println("");
 
-        drivers::Vga::print("[INT] Interrupt Vector triggered (");
-        vga_print_hex(frame->int_no);
-        drivers::Vga::println(")");
+            drivers::Vga::print("[INT] Interrupt Vector triggered (");
+            vga_print_hex(frame->int_no);
+            drivers::Vga::println(")");
+        }
     }
 }
 

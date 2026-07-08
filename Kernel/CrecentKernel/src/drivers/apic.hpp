@@ -37,6 +37,9 @@ public:
     // Send End Of Interrupt signal to LAPIC
     static void eoi();
 
+    // Initialize Local APIC Timer
+    static void init_timer(uint32_t count);
+
 private:
     // Mask and disable the legacy 8259 PIC controller
     static void disable_pic();

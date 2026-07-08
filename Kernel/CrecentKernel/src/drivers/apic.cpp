@@ -66,4 +66,13 @@ bool Apic::init() {
     return true;
 }
 
+void Apic::init_timer(uint32_t count) {
+    // Set Divide Configuration Register to divide-by-16 (value 0x03)
+    write_reg(0x3E0, 0x03);
+    // Set LVT Timer Register: Vector 32 (timer), Periodic Mode (bit 17)
+    write_reg(LAPIC_REG_LVT_TMR, 32 | (1 << 17));
+    // Set Initial Count Register to trigger tick countdown
+    write_reg(0x380, count);
+}
+
 } // namespace drivers

@@ -7,6 +7,7 @@
 #include "pmm.hpp"
 #include "vmm.hpp"
 #include "heap.hpp"
+#include "scheduler.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -19,6 +20,40 @@ public:
     }
     virtual ~TestClass() {}
 };
+
+// Test thread A function
+void thread_a_func(void* arg) {
+    (void)arg;
+    for (int i = 0; i < 30; ++i) {
+        drivers::Vga::print("A");
+        drivers::Serial::print("A");
+        // Waste time to trigger preemption
+        for (volatile int delay = 0; delay < 1000000; ) {
+            delay = delay + 1;
+        }
+    }
+    drivers::Serial::println("\n[THREAD A] Finished execution.");
+}
+
+// Test thread B function
+void thread_b_func(void* arg) {
+    (void)arg;
+    for (int i = 0; i < 30; ++i) {
+        drivers::Vga::print("B");
+        drivers::Serial::print("B");
+        // Waste time to trigger preemption
+        for (volatile int delay = 0; delay < 1000000; ) {
+            delay = delay + 1;
+        }
+    }
+    drivers::Serial::println("\n[THREAD B] Finished execution.");
+}
+
+// Test thread C function (verifies exit cleanup)
+void thread_c_func(void* arg) {
+    (void)arg;
+    drivers::Serial::println("\n[THREAD C] Started and now exiting immediately.");
+}
 
 // Define an empty dummy __main function to satisfy MinGW's global constructor initialization stub
 extern "C" void __main() {}
@@ -83,6 +118,9 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
             drivers::Serial::println("[ERROR] Slab Heap Allocator failed!");
         }
     }
+
+    // Initialize Multitasking Scheduler
+    kernel::scheduler_init();
 
     // 8. Initialize VGA text-mode graphics console
     drivers::Vga::init();
@@ -390,6 +428,36 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         drivers::Vga::println("[TEST] kfree small allocations: OK");
         if (serial_ok) {
             drivers::Serial::println("[TEST] kfree small allocations: SUCCESS");
+        }
+
+        // --- Multitasking Verification ---
+        drivers::Vga::println("");
+        drivers::Vga::println("[TEST] Starting multitasking threads (preemptive scheduling)...");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] Starting multitasking threads (preemptive scheduling)...");
+        }
+
+        kernel::thread_create(thread_a_func, nullptr);
+        kernel::thread_create(thread_b_func, nullptr);
+        kernel::thread_create(thread_c_func, nullptr);
+
+        // Initialize Local APIC Timer (periodic Vector 32 ticks)
+        drivers::Apic::init_timer(0x80000);
+
+        // Enable hardware interrupts
+        drivers::Serial::println("[TEST] Enabling interrupts via 'sti' to start scheduling...");
+        __asm__ __volatile__ ("sti");
+
+        // Wait a few moments to allow threads A, B, and C to run and interleave
+        for (volatile int delay = 0; delay < 50000000; ) {
+            delay = delay + 1;
+        }
+
+        // Disable interrupts before triggering the final Page Fault crash
+        __asm__ __volatile__ ("cli");
+        drivers::Vga::println("\n[TEST] Multitasking complete.");
+        if (serial_ok) {
+            drivers::Serial::println("\n[TEST] Multitasking complete.");
         }
 
         // Trigger page fault by reading from the unmapped address to demonstrate exception routing
