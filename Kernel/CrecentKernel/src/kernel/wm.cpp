@@ -31,44 +31,72 @@ Window::Window(int id, int x, int y, int w, int h, const char* title, uint32_t c
     this->next = nullptr;
 }
 
+static uint32_t cursor_bg_cache[256];
+static int cached_cursor_x = 0;
+static int cached_cursor_y = 0;
+static bool cursor_cached = false;
+
 void Window::draw() {
     uint8_t alpha = is_dragging ? 140 : 255;
     
-    // 1. Draw outer frame border
+    // 1. Draw outer frame border (macOS thin grey outline border)
     if (is_dragging) {
-        drivers::Framebuffer::draw_rect_alpha(rect.x, rect.y, rect.w, rect.h, 0x00A0A0A0, alpha);
+        drivers::Framebuffer::draw_rect_alpha(rect.x, rect.y, rect.w, rect.h, 0x00D0D0D0, alpha);
     } else {
-        drivers::Framebuffer::draw_rect(rect.x, rect.y, rect.w, rect.h, 0x00A0A0A0);
+        drivers::Framebuffer::draw_rect(rect.x, rect.y, rect.w, rect.h, 0x00D0D0D0);
     }
 
-    // 2. Draw active/inactive title bar
+    // 2. Draw title bar (focused: light grey 0x00E5E5E5, unfocused: 0x00F0F0F0)
     bool isActive = (WindowManager::get_mouse_x() >= rect.x && WindowManager::get_mouse_x() < rect.x + rect.w &&
                      WindowManager::get_mouse_y() >= rect.y && WindowManager::get_mouse_y() < rect.y + rect.h);
-    uint32_t title_bar_color = isActive ? 0x002A4B7C : 0x004A5A6A;
+    uint32_t title_bar_color = isActive ? 0x00E5E5E5 : 0x00F0F0F0;
     if (is_dragging) {
-        drivers::Framebuffer::draw_rect_alpha(rect.x + 2, rect.y + 2, rect.w - 4, 18, title_bar_color, alpha);
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 1, rect.y + 1, rect.w - 2, 22, title_bar_color, alpha);
     } else {
-        drivers::Framebuffer::draw_rect(rect.x + 2, rect.y + 2, rect.w - 4, 18, title_bar_color);
+        drivers::Framebuffer::draw_rect(rect.x + 1, rect.y + 1, rect.w - 2, 22, title_bar_color);
     }
 
-    // 3. Render Title text (always opaque for crisp readability)
-    drivers::Framebuffer::draw_string(title, rect.x + 6, rect.y + 7, 0x00FFFFFF);
+    // Shave top window corners to make them rounded (macOS Big Sur style)
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + 1, rect.y, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y + 1, 0x003A4E5C);
 
-    // 4. Render Close Button
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 2, rect.y, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + 1, 0x003A4E5C);
+
+    // 3. Render Title text (centered macOS style, dark grey text for light mode aesthetic)
+    int title_len = 0;
+    while (title[title_len]) title_len++;
+    int title_x = rect.x + (rect.w - title_len * 8) / 2;
+    drivers::Framebuffer::draw_string(title, title_x, rect.y + 8, 0x00333333);
+
+    // 4. Render Close, Minimize, Maximize Buttons (macOS Traffic Lights!)
     if (is_dragging) {
-        drivers::Framebuffer::draw_rect_alpha(rect.x + rect.w - 16, rect.y + 5, 12, 12, 0x00FF3333, alpha);
-        drivers::Framebuffer::draw_rect_alpha(rect.x + rect.w - 13, rect.y + 8, 6, 6, 0x00FFFFFF, alpha);
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 10, rect.y + 8, 8, 8, 0x00FF5F56, alpha); // Red close
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 24, rect.y + 8, 8, 8, 0x00FFBD2E, alpha); // Yellow minimize
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 38, rect.y + 8, 8, 8, 0x0027C93F, alpha); // Green maximize
     } else {
-        drivers::Framebuffer::draw_rect(rect.x + rect.w - 16, rect.y + 5, 12, 12, 0x00FF3333);
-        drivers::Framebuffer::draw_rect(rect.x + rect.w - 13, rect.y + 8, 6, 6, 0x00FFFFFF);
+        drivers::Framebuffer::draw_rect(rect.x + 10, rect.y + 8, 8, 8, 0x00FF5F56); // Red close
+        drivers::Framebuffer::draw_rect(rect.x + 24, rect.y + 8, 8, 8, 0x00FFBD2E); // Yellow minimize
+        drivers::Framebuffer::draw_rect(rect.x + 38, rect.y + 8, 8, 8, 0x0027C93F); // Green maximize
     }
 
-    // 5. Fill Window Client Area (Window background body)
+    // 5. Fill Window Client Area (Window background body - clean white)
     if (is_dragging) {
-        drivers::Framebuffer::draw_rect_alpha(rect.x + 2, rect.y + 20, rect.w - 4, rect.h - 22, bg_color, alpha);
+        drivers::Framebuffer::draw_rect_alpha(rect.x + 1, rect.y + 23, rect.w - 2, rect.h - 24, bg_color, alpha);
     } else {
-        drivers::Framebuffer::draw_rect(rect.x + 2, rect.y + 20, rect.w - 4, rect.h - 22, bg_color);
+        drivers::Framebuffer::draw_rect(rect.x + 1, rect.y + 23, rect.w - 2, rect.h - 24, bg_color);
     }
+
+    // Shave bottom window corners to make them rounded
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y + rect.h - 1, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + 1, rect.y + rect.h - 1, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x, rect.y + rect.h - 2, 0x003A4E5C);
+
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 1, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 2, rect.y + rect.h - 1, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(rect.x + rect.w - 1, rect.y + rect.h - 2, 0x003A4E5C);
 }
 
 void WindowManager::init() {
@@ -76,8 +104,11 @@ void WindowManager::init() {
     next_window_id = 1;
     mouse_x = 512;
     mouse_y = 384;
+    last_mouse_x = 512;
+    last_mouse_y = 384;
     mouse_pressed = false;
     active_window = nullptr;
+    cursor_cached = false;
     
     drivers::Serial::println("[INIT] Window Manager Compositor initialized.");
 }
@@ -123,38 +154,107 @@ Window* WindowManager::create_window(int x, int y, int w, int h, const char* tit
 void WindowManager::draw_cursor() {
     int mx = mouse_x;
     int my = mouse_y;
-    // Render a high-contrast white arrow with a black border directly to the physical screen
+    
+    // 1. Cache the clean background pixels under the cursor in the BACK buffer
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            cursor_bg_cache[y * 16 + x] = drivers::Framebuffer::get_pixel(mx + x, my + y);
+        }
+    }
+    cached_cursor_x = mx;
+    cached_cursor_y = my;
+    cursor_cached = true;
+    
+    // 2. Draw high-contrast white arrow with a black outline directly on the BACK buffer
     for (int y = 0; y < 12; ++y) {
         for (int x = 0; x < y + 1; ++x) {
-            drivers::Framebuffer::draw_pixel_physical(mx + x, my + y, 0x00FFFFFF);
+            drivers::Framebuffer::draw_pixel(mx + x, my + y, 0x00FFFFFF);
         }
     }
     for (int y = 0; y < 13; ++y) {
-        drivers::Framebuffer::draw_pixel_physical(mx, my + y, 0x00000000);
-        drivers::Framebuffer::draw_pixel_physical(mx + y, my + y, 0x00000000);
+        drivers::Framebuffer::draw_pixel(mx, my + y, 0x00000000);
+        drivers::Framebuffer::draw_pixel(mx + y, my + y, 0x00000000);
     }
     for (int x = 0; x < 13; ++x) {
-        drivers::Framebuffer::draw_pixel_physical(mx + x, my + 12, 0x00000000);
+        drivers::Framebuffer::draw_pixel(mx + x, my + 12, 0x00000000);
     }
 }
 
 void WindowManager::erase_cursor() {
-    // Copy the 16x16 bounding box from clean back buffer to physical screen to erase old cursor trail
-    Rect r = { last_mouse_x, last_mouse_y, 16, 16 };
-    drivers::Framebuffer::swap_dirty_rect_fast(r);
+    if (!cursor_cached) return;
+    
+    // Restore the saved background pixels back to the BACK buffer
+    int mx = cached_cursor_x;
+    int my = cached_cursor_y;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            drivers::Framebuffer::draw_pixel(mx + x, my + y, cursor_bg_cache[y * 16 + x]);
+        }
+    }
+    cursor_cached = false;
+}
+
+void WindowManager::draw_mac_decorations() {
+    // 1. Draw top macOS Menu Bar (translucent-style light grey)
+    drivers::Framebuffer::draw_rect(0, 0, 1024, 22, 0x00F0F0F0);
+    drivers::Framebuffer::draw_rect(0, 22, 1024, 1, 0x00D2D2D2);
+
+    // 2. Draw Apple Menu items
+    drivers::Framebuffer::draw_string("Finder  File  Edit  View  Go  Window  Help", 20, 7, 0x00333333);
+    drivers::Framebuffer::draw_string("Wed 14:35", 930, 7, 0x00333333);
+
+    // 3. Draw bottom macOS Dock (translucent centered tray)
+    // Dock centered at x=312, y=710, width=400, height=48
+    drivers::Framebuffer::draw_rect(312, 710, 400, 48, 0x00EAEAEA);
+    drivers::Framebuffer::draw_rect(312, 710, 400, 1, 0x00C0C0C0);
+    drivers::Framebuffer::draw_rect(312, 757, 400, 1, 0x00C0C0C0);
+    drivers::Framebuffer::draw_rect(312, 710, 1, 48, 0x00C0C0C0);
+    drivers::Framebuffer::draw_rect(711, 710, 1, 48, 0x00C0C0C0);
+
+    // Shave Dock corners to make it rounded
+    drivers::Framebuffer::draw_pixel(312, 710, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(313, 710, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(312, 711, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(711, 710, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(710, 710, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(711, 711, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(312, 757, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(313, 757, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(312, 756, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(711, 757, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(710, 757, 0x003A4E5C);
+    drivers::Framebuffer::draw_pixel(711, 756, 0x003A4E5C);
+
+    // 4. Draw Dock Application Icons (colored rounded squares with clean identifiers)
+    drivers::Framebuffer::draw_rect(332, 716, 36, 36, 0x001B72E8); // Finder (Blue)
+    drivers::Framebuffer::draw_string("F", 346, 730, 0x00FFFFFF);
+
+    drivers::Framebuffer::draw_rect(388, 716, 36, 36, 0x0000A2C9); // Safari (Cyan)
+    drivers::Framebuffer::draw_string("S", 402, 730, 0x00FFFFFF);
+
+    drivers::Framebuffer::draw_rect(444, 716, 36, 36, 0x00E0E0E0); // Mail (White)
+    drivers::Framebuffer::draw_string("M", 458, 730, 0x00FF3B30);
+
+    drivers::Framebuffer::draw_rect(500, 716, 36, 36, 0x001A1A1A); // Terminal (Black)
+    drivers::Framebuffer::draw_string("T", 514, 730, 0x004AF02C);
+
+    drivers::Framebuffer::draw_rect(556, 716, 36, 36, 0x007E8E9F); // Settings (Grey)
+    drivers::Framebuffer::draw_string("A", 570, 730, 0x00FFFFFF);
+
+    drivers::Framebuffer::draw_rect(612, 716, 36, 36, 0x00FFCC00); // Notes (Yellow)
+    drivers::Framebuffer::draw_string("N", 626, 730, 0x00333333);
 }
 
 void WindowManager::draw_desktop() {
-    draw_cursor();
+    // Non-op as we handle precise dirty rect blits inside mouse movement handles
 }
 
 void WindowManager::force_redraw_all() {
     // Clear back buffer
     drivers::Framebuffer::clear(0x003A4E5C);
     
-    // Draw wallpaper text
-    drivers::Framebuffer::draw_string("CrecentOS - Desktop Environment (Ring 0 Compositor)", 20, 20, 0x00E0E0E0);
-    drivers::Framebuffer::draw_string("Use Mouse to Drag Windows | Preemption & Multitasking Active", 20, 36, 0x0090A0B0);
+    // Draw macOS desktop decorations
+    draw_mac_decorations();
     
     // Draw windows in z-order
     Window* curr = window_list_head;
@@ -166,8 +266,13 @@ void WindowManager::force_redraw_all() {
     // Swap full screen
     drivers::Framebuffer::swap_buffers();
     
-    // Overlay new cursor
+    // Draw cursor in the back buffer and cache it
     draw_cursor();
+    
+    // Blit the small cursor rect to display
+    Rect cursor_rect = { mouse_x, mouse_y, 16, 16 };
+    drivers::Framebuffer::swap_dirty_rect_fast(cursor_rect);
+
     last_mouse_x = mouse_x;
     last_mouse_y = mouse_y;
 }
@@ -210,7 +315,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
     if (new_y < 0) new_y = 0;
     if (new_y >= 768) new_y = 767;
 
-    // Erase old cursor (restore from clean back buffer)
+    // 1. Erase the old cursor from the BACK buffer
     erase_cursor();
 
     bool position_changed = (new_x != mouse_x || new_y != mouse_y);
@@ -221,8 +326,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
         Window* clicked = nullptr;
         Window* curr = window_list_head;
         while (curr) {
-            // Check if coordinates land in the title bar zone (height 20px)
-            Rect title_rect = {curr->rect.x, curr->rect.y, curr->rect.w, 20};
+            // Check if coordinates land in the title bar zone (height 22px in macOS style)
+            Rect title_rect = {curr->rect.x, curr->rect.y, curr->rect.w, 22};
             if (title_rect.contains(new_x, new_y)) {
                 clicked = curr;
             }
@@ -246,7 +351,11 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
         }
     }
 
-    // Process drag movement with Bounding-Box Merging
+    // Update coordinates
+    mouse_x = new_x;
+    mouse_y = new_y;
+
+    // Process drag movement with Bounding-Box Merging (translucency + cursor inside)
     if (pressed && active_window && active_window->is_dragging && position_changed) {
         Rect old_rect = active_window->rect;
         int next_x = new_x - drag_offset_x;
@@ -256,26 +365,34 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
             active_window->rect.x = next_x;
             active_window->rect.y = next_y;
 
-            // Compute enclosing bounding box
+            // Enclose old and new window rects AND cursor rects in the unified dirty bounding box
             int x_min = old_rect.x < next_x ? old_rect.x : next_x;
+            if (last_mouse_x < x_min) x_min = last_mouse_x;
+            if (mouse_x < x_min) x_min = mouse_x;
+
             int y_min = old_rect.y < next_y ? old_rect.y : next_y;
-            
+            if (last_mouse_y < y_min) y_min = last_mouse_y;
+            if (mouse_y < y_min) y_min = mouse_y;
+
             int old_r = old_rect.x + old_rect.w;
             int new_r = next_x + active_window->rect.w;
             int x_max = old_r > new_r ? old_r : new_r;
-            
+            if (last_mouse_x + 16 > x_max) x_max = last_mouse_x + 16;
+            if (mouse_x + 16 > x_max) x_max = mouse_x + 16;
+
             int old_b = old_rect.y + old_rect.h;
             int new_b = next_y + active_window->rect.h;
             int y_max = old_b > new_b ? old_b : new_b;
+            if (last_mouse_y + 16 > y_max) y_max = last_mouse_y + 16;
+            if (mouse_y + 16 > y_max) y_max = mouse_y + 16;
 
             Rect dirty = { x_min, y_min, x_max - x_min, y_max - y_min };
 
             // 1. Clear dirty region in back buffer to background color
             drivers::Framebuffer::draw_rect(dirty.x, dirty.y, dirty.w, dirty.h, 0x003A4E5C);
 
-            // 2. Draw wallpaper text in back buffer
-            drivers::Framebuffer::draw_string("CrecentOS - Desktop Environment (Ring 0 Compositor)", 20, 20, 0x00E0E0E0);
-            drivers::Framebuffer::draw_string("Use Mouse to Drag Windows | Preemption & Multitasking Active", 20, 36, 0x0090A0B0);
+            // 2. Draw macOS desktop decorations in back buffer
+            draw_mac_decorations();
 
             // 3. Draw all windows in z-order
             Window* curr = window_list_head;
@@ -284,7 +401,10 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
                 curr = curr->next;
             }
 
-            // 4. Swap only the dirty rectangle using fast blitter
+            // 4. Draw the new cursor on the back buffer so it is blitted atomically
+            draw_cursor();
+
+            // 5. Swap only the dirty rectangle using fast aligned blitter
             drivers::Framebuffer::swap_dirty_rect_fast(dirty);
 
             // Log coordinates for automated verification
@@ -322,11 +442,20 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
             buf_y[idx_y] = '\0';
             drivers::Serial::println(buf_y);
         }
-    }
+    } else if (position_changed) {
+        // If the window is not dragging but the mouse moved, we only swap the cursor dirty region
+        int x_min = last_mouse_x < mouse_x ? last_mouse_x : mouse_x;
+        int y_min = last_mouse_y < mouse_y ? last_mouse_y : mouse_y;
+        int x_max = (last_mouse_x + 16) > (mouse_x + 16) ? (last_mouse_x + 16) : (mouse_x + 16);
+        int y_max = (last_mouse_y + 16) > (mouse_y + 16) ? (last_mouse_y + 16) : (mouse_y + 16);
+        Rect cursor_dirty = { x_min, y_min, x_max - x_min, y_max - y_min };
 
-    // Update coordinates
-    mouse_x = new_x;
-    mouse_y = new_y;
+        // Draw new cursor on the back buffer
+        draw_cursor();
+
+        // Swap only this small cursor dirty region
+        drivers::Framebuffer::swap_dirty_rect_fast(cursor_dirty);
+    }
 
     // Click release state change
     if (!pressed && mouse_pressed) {
@@ -342,9 +471,6 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool pressed) {
     }
 
     mouse_pressed = pressed;
-
-    // Draw cursor in its new position on physical screen
-    draw_cursor();
 
     // Cache current cursor positions
     last_mouse_x = mouse_x;

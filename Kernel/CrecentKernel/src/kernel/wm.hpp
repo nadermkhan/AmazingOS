@@ -41,6 +41,7 @@ public:
     static void init();
     static Window* create_window(int x, int y, int w, int h, const char* title, uint32_t color);
     static void draw_desktop();
+    static void draw_mac_decorations();
     static void force_redraw_all();
     static void handle_mouse_move(int new_x, int new_y, bool pressed);
     
