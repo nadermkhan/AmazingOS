@@ -42,11 +42,6 @@ static constexpr int MENU_WIDTH        = 180;
 static constexpr int MENU_ITEM_HEIGHT  = 26;
 static constexpr int MENU_PADDING      = 4;
 
-// Cursor background cache
-static uint32_t cursor_bg_cache[256];
-static int cached_cursor_x = 0;
-static int cached_cursor_y = 0;
-static bool cursor_cached = false;
 static int dragged_desktop_item_idx = -1;
 static int click_start_x = 0;
 static int click_start_y = 0;
@@ -128,29 +123,13 @@ static bool title_starts_with_custom(const char* title, const char* prefix) {
 }
 
 // File-scoped cursor updater (fixes cache mismatch and OOB issues via physical VRAM rendering)
-static void update_cursor(int nx, int ny) {
-    if (cursor_cached) {
-        int w = drivers::Framebuffer::get_width();
-        int h = drivers::Framebuffer::get_height();
-        for (int y = 0; y < 16; ++y) {
-            for (int x = 0; x < 16; ++x) {
-                int px = cached_cursor_x + x;
-                int py = cached_cursor_y + y;
-                if (px >= 0 && px < w && py >= 0 && py < h) {
-                    uint32_t clean_color = drivers::Framebuffer::get_pixel(px, py);
-                    drivers::Framebuffer::draw_pixel_physical(px, py, clean_color);
-                }
-            }
-        }
-        cursor_cached = false;
-    }
-
+static void plot_cursor_to_backbuffer(int nx, int ny) {
     int w = drivers::Framebuffer::get_width();
     int h = drivers::Framebuffer::get_height();
 
     auto draw_cursor_pixel = [&](int px, int py, uint32_t color) {
         if (px >= 0 && px < w && py >= 0 && py < h) {
-            drivers::Framebuffer::draw_pixel_physical(px, py, color);
+            drivers::Framebuffer::draw_pixel(px, py, color);
         }
     };
 
@@ -168,11 +147,8 @@ static void update_cursor(int nx, int ny) {
     for (int x = 0; x < 13; ++x) {
         draw_cursor_pixel(nx + x, ny + 12, C_BLACK);
     }
-
-    cached_cursor_x = nx;
-    cached_cursor_y = ny;
-    cursor_cached = true;
 }
+
 
 // ---------------------------------------------------------------------------
 // Window implementation
@@ -1307,7 +1283,6 @@ void WindowManager::init() {
     mouse_pressed = false;
     right_mouse_pressed = false;
     active_window = nullptr;
-    cursor_cached = false;
     active_menu.active = false;
 
     drivers::Serial::println("[INIT] Window Manager Compositor initialized.");
@@ -1580,25 +1555,9 @@ void WindowManager::bring_to_front(Window* win) {
 // Cursor
 // ---------------------------------------------------------------------------
 void WindowManager::draw_cursor() {
-    update_cursor(mouse_x, mouse_y);
 }
 
 void WindowManager::erase_cursor() {
-    if (cursor_cached) {
-        int w = drivers::Framebuffer::get_width();
-        int h = drivers::Framebuffer::get_height();
-        for (int y = 0; y < 16; ++y) {
-            for (int x = 0; x < 16; ++x) {
-                int px = cached_cursor_x + x;
-                int py = cached_cursor_y + y;
-                if (px >= 0 && px < w && py >= 0 && py < h) {
-                    uint32_t clean_color = drivers::Framebuffer::get_pixel(px, py);
-                    drivers::Framebuffer::draw_pixel_physical(px, py, clean_color);
-                }
-            }
-        }
-        cursor_cached = false;
-    }
 }
 
 void WindowManager::blit_cursor() {
@@ -1673,10 +1632,10 @@ void WindowManager::force_redraw_all() {
     draw_mac_decorations();
     draw_all_windows();
     
-    drivers::Framebuffer::swap_buffers();
+    // Draw cursor in backbuffer before swap
+    plot_cursor_to_backbuffer(mouse_x, mouse_y);
     
-    cursor_cached = false;
-    update_cursor(mouse_x, mouse_y);
+    drivers::Framebuffer::swap_buffers();
 }
 
 // ---------------------------------------------------------------------------
@@ -1885,11 +1844,14 @@ void WindowManager::draw_mac_decorations() {
 // ---------------------------------------------------------------------------
 // Fix 3 & 4: Unified cursor update guarantee and perfectly bounded rectangle clip
 void WindowManager::redraw_dirty_rect(const Rect& dirty) {
+    int end_x = dirty.x + dirty.w;
+    int y_end = dirty.y + dirty.h;
+
     Rect scaled_dirty = {
         scale_dim(dirty.x),
         scale_dim(dirty.y),
-        scale_dim(dirty.w),
-        scale_dim(dirty.h)
+        scale_dim(end_x) - scale_dim(dirty.x),
+        scale_dim(y_end) - scale_dim(dirty.y)
     };
     
     drivers::Framebuffer::set_clip_rect(scaled_dirty);
@@ -1913,11 +1875,11 @@ void WindowManager::redraw_dirty_rect(const Rect& dirty) {
     draw_all_windows();
     draw_drag_preview();
     
+    // Draw the cursor on the backbuffer inside the clipped region
+    plot_cursor_to_backbuffer(mouse_x, mouse_y);
+    
     drivers::Framebuffer::clear_clip_rect();
     drivers::Framebuffer::swap_dirty_rect_fast(scaled_dirty);
-    
-    cursor_cached = false;
-    update_cursor(mouse_x, mouse_y);
 }
 
 // ---------------------------------------------------------------------------
