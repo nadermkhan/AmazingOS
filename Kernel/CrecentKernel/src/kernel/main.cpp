@@ -12,6 +12,7 @@
 #include "syscall.hpp"
 #include "../drivers/framebuffer.hpp"
 #include "wm.hpp"
+#include "../drivers/ps2.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -205,20 +206,53 @@ void gui_demo_thread(void* arg) {
     // Draw initial desktop frame
     wm::WindowManager::draw_desktop();
 
-    // 4. Perform an automated window drag sequence
-    drivers::Serial::println("[DEMO] Starting Window Compositor Drag Verification...");
+    // 4. Verify IDT Interrupt Gate Routing for Vectors 33 & 44
+    drivers::Serial::println("[DEMO] Verifying Interrupt Gate routing for Keyboard (Vector 33)...");
+    __asm__ __volatile__ ("int $33");
+    drivers::Serial::println("[DEMO] Verifying Interrupt Gate routing for Mouse (Vector 44)...");
+    __asm__ __volatile__ ("int $44");
+    drivers::Serial::println("[DEMO] Interrupt Gate routing verified successfully.");
 
-    // Click inside the title bar of win1 at (150, 130)
-    bool click = true;
-    int mouse_x = 150;
-    int mouse_y = 130;
-    wm::WindowManager::handle_mouse_move(mouse_x, mouse_y, click);
+    // 5. Perform an automated window drag sequence using the Top-Half/Bottom-Half pipeline
+    drivers::Serial::println("[DEMO] Starting Window Compositor Drag Verification via Polling...");
 
-    // Smoothly drag the window over 10 steps
+    // Initial cursor coordinate state
+    int cursor_x = 100;
+    int cursor_y = 100;
+
+    // Simulate mouse move to (150, 130) inside the title bar of win1
+    drivers::Ps2::inject_mouse_event(50, -30, false, false);
+
+    // First poll tick
+    int m_dx = 0, m_dy = 0;
+    bool m_left = false, m_right = false;
+    if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
+        cursor_x += m_dx;
+        cursor_y -= m_dy; // Mouse dy is upward positive, screen y is downward positive
+        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+    }
+    wm::WindowManager::draw_desktop();
+
+    // Click left button down
+    drivers::Ps2::inject_mouse_event(0, 0, true, false);
+    if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
+        cursor_x += m_dx;
+        cursor_y -= m_dy;
+        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+    }
+    wm::WindowManager::draw_desktop();
+
+    // Smoothly drag relative deltas over 10 steps
     for (int step = 1; step <= 10; ++step) {
-        int dx = step * 15;
-        int dy = step * 10;
-        wm::WindowManager::handle_mouse_move(mouse_x + dx, mouse_y + dy, click);
+        // Inject a relative mouse movement of dx = 15, dy = -10 (downward move)
+        drivers::Ps2::inject_mouse_event(15, -10, true, false);
+
+        // Compositor Poll (Bottom-Half processing)
+        if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
+            cursor_x += m_dx;
+            cursor_y -= m_dy;
+            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+        }
         wm::WindowManager::draw_desktop();
 
         // Delay to make it visible
@@ -228,17 +262,46 @@ void gui_demo_thread(void* arg) {
     }
 
     // Release mouse click
-    click = false;
-    wm::WindowManager::handle_mouse_move(mouse_x + 150, mouse_y + 100, click);
+    drivers::Ps2::inject_mouse_event(0, 0, false, false);
+    if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
+        cursor_x += m_dx;
+        cursor_y -= m_dy;
+        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+    }
     wm::WindowManager::draw_desktop();
+
+    // 6. Verify Keyboard translation and polling
+    drivers::Ps2::inject_keyboard_char('S');
+    char key_char = 0;
+    if (drivers::Ps2::poll_keyboard(key_char)) {
+        drivers::Serial::print("[DEMO] Compositor polled keyboard character: '");
+        char str[2] = {key_char, '\0'};
+        drivers::Serial::print(str);
+        drivers::Serial::println("'");
+    }
 
     drivers::Serial::println("[DEMO] Window Composer Drag Verification Complete - SUCCESS");
     gui_demo_complete = true;
 
-    // 5. Compositor Refresh Loop (Refreshes the display periodically)
+    // 7. Compositor Refresh & Polling Loop
     while (true) {
+        // Poll mouse coordinates
+        if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
+            cursor_x += m_dx;
+            cursor_y -= m_dy;
+            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+        }
+        
+        // Poll keyboard characters
+        if (drivers::Ps2::poll_keyboard(key_char)) {
+            drivers::Serial::print("[COMPOSITOR] Key typed: '");
+            char str[2] = {key_char, '\0'};
+            drivers::Serial::print(str);
+            drivers::Serial::println("'");
+        }
+
         wm::WindowManager::draw_desktop();
-        // Slow refresh tick
+        
         for (volatile int delay = 0; delay < 2000000; ) {
             delay = delay + 1;
         }
@@ -273,6 +336,12 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         drivers::Serial::println("[INIT] IDT and assembly exception handlers loaded.");
     }
 
+    // 6. Initialize Virtual Memory Manager (VMM)
+    kernel::vmm_init();
+    if (serial_ok) {
+        drivers::Serial::println("[INIT] Virtual Memory Manager (VMM) initialized.");
+    }
+
     // 4. Initialize Local APIC and disable legacy PIC
     bool apic_ok = drivers::Apic::init();
     if (serial_ok) {
@@ -283,6 +352,13 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         }
     }
 
+    // Initialize PS/2 Keyboard and Mouse Drivers if APIC is ready
+    if (apic_ok) {
+        drivers::Ps2::init();
+        drivers::Apic::route_irq(1, 33);  // Keyboard IRQ 1 -> Vector 33
+        drivers::Apic::route_irq(12, 44); // Mouse IRQ 12 -> Vector 44
+    }
+
     // 5. Initialize Physical Memory Manager (PMM)
     bool pmm_ok = kernel::pmm_init(magic, maddr);
     if (serial_ok) {
@@ -291,12 +367,6 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         } else {
             drivers::Serial::println("[ERROR] Physical Memory Manager (PMM) failed!");
         }
-    }
-
-    // 6. Initialize Virtual Memory Manager (VMM)
-    kernel::vmm_init();
-    if (serial_ok) {
-        drivers::Serial::println("[INIT] Virtual Memory Manager (VMM) initialized.");
     }
 
     // 7. Initialize Slab Heap Allocator

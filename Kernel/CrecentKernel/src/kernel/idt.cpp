@@ -3,6 +3,7 @@
 #include "../drivers/serial.hpp"
 #include "../drivers/apic.hpp"
 #include "scheduler.hpp"
+#include "../drivers/ps2.hpp"
 
 // Table of 256 handler pointers generated in assembly
 extern "C" void* isr_stub_table[256];
@@ -177,6 +178,12 @@ extern "C" __attribute__((sysv_abi)) void interrupt_handler(InterruptFrame* fram
             drivers::Apic::eoi();
             // Invoke the scheduler to switch thread context
             kernel::schedule();
+        } else if (frame->int_no == 33) {
+            drivers::Ps2::handle_keyboard_interrupt();
+            drivers::Apic::eoi();
+        } else if (frame->int_no == 44) {
+            drivers::Ps2::handle_mouse_interrupt();
+            drivers::Apic::eoi();
         } else {
             // Log interrupt (IRQs and software interrupts)
             drivers::Serial::print("[INT] Captured Interrupt Vector: ");

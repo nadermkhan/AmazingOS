@@ -40,6 +40,9 @@ public:
     // Initialize Local APIC Timer
     static void init_timer(uint32_t count);
 
+    // Route an IRQ using I/O APIC redirection table
+    static void route_irq(uint8_t irq, uint8_t vector);
+
 private:
     // Mask and disable the legacy 8259 PIC controller
     static void disable_pic();
