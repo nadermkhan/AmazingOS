@@ -3,6 +3,8 @@
 #include "../kernel/heap.hpp"
 #include "font.hpp"
 
+extern "C" void* memcpy(void* dest, const void* src, size_t n);
+
 namespace drivers {
 
 static uint32_t pci_read_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
@@ -72,6 +74,7 @@ uint8_t Framebuffer::bpp = 0;
 bool Framebuffer::initialized = false;
 Rect Framebuffer::clip_rect = {0, 0, 0, 0};
 int Framebuffer::wallpaper_theme_id = 0;
+uint32_t* Framebuffer::wallpaper_cache = nullptr;
 
 bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, uint8_t b) {
     physical_base = phys_addr;
@@ -97,9 +100,20 @@ bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, u
         return false;
     }
 
+    wallpaper_cache = (uint32_t*)kernel::kmalloc(size);
+    if (!wallpaper_cache) {
+        kernel::kfree(back_buffer);
+        back_buffer = nullptr;
+        return false;
+    }
+
     // 3. Clear initial frame to black
     initialized = true;
     clip_rect = {0, 0, (int)width, (int)height};
+    
+    // Generate initial wallpaper cache
+    update_wallpaper_cache();
+
     clear(0x00000000);
     swap_buffers();
 
@@ -331,8 +345,82 @@ void Framebuffer::draw_circle_filled_alpha(int xc, int yc, int r, uint32_t color
 
 static uint32_t wallpaper_lut[3000];
 
+void Framebuffer::generate_wallpaper_procedural() {
+    uint32_t pitch_words = pitch / 4;
+
+    if (wallpaper_theme_id == 3) {
+        for (uint32_t cy = 0; cy < height; ++cy) {
+            uint32_t line_offset = cy * pitch_words;
+            for (uint32_t cx = 0; cx < width; ++cx) {
+                back_buffer[line_offset + cx] = 0x001B1B1F;
+            }
+        }
+        return;
+    } else if (wallpaper_theme_id == 4) {
+        for (uint32_t cy = 0; cy < height; ++cy) {
+            uint32_t line_offset = cy * pitch_words;
+            for (uint32_t cx = 0; cx < width; ++cx) {
+                uint32_t dist_sq = cx * cx + cy * cy;
+                uint32_t factor = (dist_sq * 16777ULL) >> 26;
+                factor = factor & 0xFF;
+                uint32_t r = ((0x5E * (255 - factor) + 0xEC * factor) * 257) >> 16;
+                uint32_t g = ((0x21 * (255 - factor) + 0x48 * factor) * 257) >> 16;
+                uint32_t b = ((0xD0 * (255 - factor) + 0x99 * factor) * 257) >> 16;
+                back_buffer[line_offset + cx] = (r << 16) | (g << 8) | b;
+            }
+        }
+        return;
+    }
+
+    uint8_t r1 = 0x5E, g1 = 0x21, b1 = 0xD0; // Royal Purple
+    uint8_t r2 = 0x0F, g2 = 0x52, b2 = 0xBA; // Sapphire Blue
+
+    if (wallpaper_theme_id == 1) { // Sunset
+        r1 = 0xEC; g1 = 0x48; b1 = 0x99;
+        r2 = 0xF5; g2 = 0x9E; b2 = 0x0B;
+    } else if (wallpaper_theme_id == 2) { // Forest
+        r1 = 0x05; g1 = 0x96; b1 = 0x69;
+        r2 = 0x0D; g2 = 0x94; b2 = 0x88;
+    }
+
+    uint32_t max_dist = width + height;
+    if (max_dist > 3000) max_dist = 3000;
+    for (uint32_t dist = 0; dist < max_dist; ++dist) {
+        uint32_t factor = (dist * 255) / max_dist;
+        if (factor > 255) factor = 255;
+        uint32_t r = ((r1 * (255 - factor)) + (r2 * factor)) / 255;
+        uint32_t g = ((g1 * (255 - factor)) + (g2 * factor)) / 255;
+        uint32_t b = ((b1 * (255 - factor)) + (b2 * factor)) / 255;
+        wallpaper_lut[dist] = (r << 16) | (g << 8) | b;
+    }
+
+    for (uint32_t cy = 0; cy < height; ++cy) {
+        uint32_t line_offset = cy * pitch_words;
+        for (uint32_t cx = 0; cx < width; ++cx) {
+            uint32_t dist = cx + cy;
+            if (dist >= 3000) dist = 2999;
+            back_buffer[line_offset + cx] = wallpaper_lut[dist];
+        }
+    }
+}
+
+void Framebuffer::update_wallpaper_cache() {
+    if (!initialized || !wallpaper_cache) return;
+    
+    uint32_t* temp = back_buffer;
+    back_buffer = wallpaper_cache;
+    
+    Rect old_clip = clip_rect;
+    clip_rect = {0, 0, (int)width, (int)height};
+    
+    generate_wallpaper_procedural();
+    
+    clip_rect = old_clip;
+    back_buffer = temp;
+}
+
 void Framebuffer::draw_mac_wallpaper(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
-    if (!initialized) return;
+    if (!initialized || !wallpaper_cache) return;
     
     int start_x = (int)x;
     int start_y = (int)y;
@@ -347,71 +435,20 @@ void Framebuffer::draw_mac_wallpaper(uint32_t x, uint32_t y, uint32_t w, uint32_
     if (start_x >= end_x || start_y >= end_y) return;
 
     uint32_t pitch_words = pitch / 4;
-    
-    if (wallpaper_theme_id == 3) {
-        for (int cy = start_y; cy < end_y; ++cy) {
-            uint32_t line_offset = cy * pitch_words;
-            for (int cx = start_x; cx < end_x; ++cx) {
-                back_buffer[line_offset + cx] = 0x001B1B1F;
-            }
-        }
-        return;
-    } else if (wallpaper_theme_id == 4) {
-        for (int cy = start_y; cy < end_y; ++cy) {
-            uint32_t line_offset = cy * pitch_words;
-            for (int cx = start_x; cx < end_x; ++cx) {
-                uint32_t dist_sq = cx * cx + cy * cy;
-                uint32_t factor = (dist_sq * 16777ULL) >> 26;
-                factor = factor & 0xFF;
-                uint32_t r = ((0x5E * (255 - factor) + 0xEC * factor) * 257) >> 16;
-                uint32_t g = ((0x21 * (255 - factor) + 0x48 * factor) * 257) >> 16;
-                uint32_t b = ((0xD0 * (255 - factor) + 0x99 * factor) * 257) >> 16;
-                back_buffer[line_offset + cx] = (r << 16) | (g << 8) | b;
-            }
-        }
-        return;
-    }
-
-    static int last_wallpaper_theme_id = -1;
-    if (wallpaper_theme_id != last_wallpaper_theme_id) {
-        last_wallpaper_theme_id = wallpaper_theme_id;
-        
-        uint8_t r1 = 0x5E, g1 = 0x21, b1 = 0xD0; // Royal Purple
-        uint8_t r2 = 0x0F, g2 = 0x52, b2 = 0xBA; // Sapphire Blue
-
-        if (wallpaper_theme_id == 1) { // Sunset
-            r1 = 0xEC; g1 = 0x48; b1 = 0x99;
-            r2 = 0xF5; g2 = 0x9E; b2 = 0x0B;
-        } else if (wallpaper_theme_id == 2) { // Forest
-            r1 = 0x05; g1 = 0x96; b1 = 0x69;
-            r2 = 0x0D; g2 = 0x94; b2 = 0x88;
-        }
-
-        uint32_t max_dist = width + height;
-        if (max_dist > 3000) max_dist = 3000;
-        for (uint32_t dist = 0; dist < max_dist; ++dist) {
-            uint32_t factor = (dist * 255) / max_dist;
-            if (factor > 255) factor = 255;
-            uint32_t r = ((r1 * (255 - factor)) + (r2 * factor)) / 255;
-            uint32_t g = ((g1 * (255 - factor)) + (g2 * factor)) / 255;
-            uint32_t b = ((b1 * (255 - factor)) + (b2 * factor)) / 255;
-            wallpaper_lut[dist] = (r << 16) | (g << 8) | b;
-        }
-    }
+    uint32_t bytes_to_copy = (end_x - start_x) * sizeof(uint32_t);
 
     for (int cy = start_y; cy < end_y; ++cy) {
         uint32_t line_offset = cy * pitch_words;
-        for (int cx = start_x; cx < end_x; ++cx) {
-            uint32_t dist = cx + cy;
-            if (dist >= 3000) dist = 2999;
-            back_buffer[line_offset + cx] = wallpaper_lut[dist];
-        }
+        memcpy(&back_buffer[line_offset + start_x], 
+               &wallpaper_cache[line_offset + start_x], 
+               bytes_to_copy);
     }
 }
 
 void Framebuffer::set_wallpaper_theme(int theme_id) {
-    if (theme_id >= 0 && theme_id <= 2) {
+    if (theme_id >= 0 && theme_id <= 4) {
         wallpaper_theme_id = theme_id;
+        update_wallpaper_cache();
     }
 }
 

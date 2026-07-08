@@ -27,6 +27,9 @@ private:
     static bool initialized;
     static Rect clip_rect;
     static int wallpaper_theme_id;
+    static uint32_t* wallpaper_cache;
+    static void generate_wallpaper_procedural();
+    static void update_wallpaper_cache();
 
 public:
     static void set_clip_rect(Rect r);

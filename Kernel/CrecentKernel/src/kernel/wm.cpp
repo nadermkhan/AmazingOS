@@ -1250,9 +1250,6 @@ void Window::draw(bool is_active) {
     }
 
     uint8_t alpha = 255;
-    if (this->is_dragging) {
-        alpha = 200; // Hardware-free semi-transparency for smooth visual feedback
-    }
 
     WindowManager::draw_window_shadow(this->rect, active, alpha);
 
@@ -2949,14 +2946,15 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                 active_window->rect.x = next_x;
                 active_window->rect.y = next_y;
 
-                // Unified Bounding Box Strategy (Eliminates intersecting VRAM double-writes)
-                int min_x = old_rect.x < next_x ? old_rect.x : next_x;
-                int min_y = old_rect.y < next_y ? old_rect.y : next_y;
-                int max_x = (old_rect.x + old_rect.w > next_x + active_window->rect.w) ? (old_rect.x + old_rect.w) : (next_x + active_window->rect.w);
-                int max_y = (old_rect.y + old_rect.h > next_y + active_window->rect.h) ? (old_rect.y + old_rect.h) : (next_y + active_window->rect.h);
+                // FIX: Decouple dirty rects. Do NOT merge them.
+                Rect old_dirty = {old_rect.x - 32, old_rect.y - 32, old_rect.w + 64, old_rect.h + 64};
+                Rect new_dirty = {next_x - 32, next_y - 32, active_window->rect.w + 64, active_window->rect.h + 64};
 
-                dirty = {min_x - 32, min_y - 32, max_x - min_x + 64, max_y - min_y + 64};
-                needs_redraw = true; // Route through the standard, safe single-pass pipeline
+                // Redraw the area where the window used to be (restoring background)
+                redraw_dirty_rect(old_dirty);
+                // Redraw the area where the window is now
+                redraw_dirty_rect(new_dirty);
+                
                 state_updated = true;
             }
         } else if (active_window && is_resizing_window) {
