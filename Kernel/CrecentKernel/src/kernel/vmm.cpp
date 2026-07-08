@@ -10,11 +10,11 @@ void vmm_init() {
     // Read CR3 control register
     __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(cr3_val));
     // Clear lower 12 flags bits to retrieve physical base address of active PML4
-    active_pml4 = cr3_val & ~0xFFFUL;
+    active_pml4 = cr3_val & ~0xFFFULL;
 }
 
 bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
-    if ((virt & 0xFFFUL) || (phys & 0xFFFUL)) {
+    if ((virt & 0xFFFULL) || (phys & 0xFFFULL)) {
         return false; // Virtual and physical addresses must be 4KB aligned
     }
 
@@ -31,7 +31,7 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
         // Link PML4 entry to the new page directory pointer table with present + writable flags
         pml4[pml4_idx] = new_pdpt | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
     }
-    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFUL);
+    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFULL);
 
     // 2. PDPT -> PD
     if (!(pdpt[pdpt_idx] & VMM_FLAG_PRESENT)) {
@@ -39,7 +39,7 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
         if (!new_pd) return false;
         pdpt[pdpt_idx] = new_pd | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
     }
-    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFUL);
+    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
 
     // 3. PD -> PT
     if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) {
@@ -47,7 +47,7 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
         if (!new_pt) return false;
         pd[pd_idx] = new_pt | VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER;
     }
-    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFUL);
+    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFULL);
 
     // 4. PT -> Physical Page
     pt[pt_idx] = phys | flags;
@@ -59,7 +59,7 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
 }
 
 bool vmm_unmap_page(uint64_t virt) {
-    if (virt & 0xFFFUL) {
+    if (virt & 0xFFFULL) {
         return false;
     }
 
@@ -70,13 +70,13 @@ bool vmm_unmap_page(uint64_t virt) {
     size_t pt_idx   = (virt >> 12) & 0x1FF;
 
     if (!(pml4[pml4_idx] & VMM_FLAG_PRESENT)) return false;
-    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFUL);
+    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFULL);
 
     if (!(pdpt[pdpt_idx] & VMM_FLAG_PRESENT)) return false;
-    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFUL);
+    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
 
     if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return false;
-    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFUL);
+    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFULL);
 
     if (!(pt[pt_idx] & VMM_FLAG_PRESENT)) return false;
 
@@ -97,17 +97,41 @@ bool vmm_is_mapped(uint64_t virt) {
     size_t pt_idx   = (virt >> 12) & 0x1FF;
 
     if (!(pml4[pml4_idx] & VMM_FLAG_PRESENT)) return false;
-    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFUL);
+    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFULL);
 
     if (!(pdpt[pdpt_idx] & VMM_FLAG_PRESENT)) return false;
-    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFUL);
+    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
 
     if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return false;
     // Check if it is a 2MB huge page (which we configured in GDT/Bootstrap tables)
     if (pd[pd_idx] & VMM_FLAG_HUGE) return true;
 
-    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFUL);
+    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFULL);
     return (pt[pt_idx] & VMM_FLAG_PRESENT) != 0;
+}
+
+uint64_t vmm_get_phys(uint64_t virt) {
+    uint64_t* pml4 = (uint64_t*)active_pml4;
+    size_t pml4_idx = (virt >> 39) & 0x1FF;
+    size_t pdpt_idx = (virt >> 30) & 0x1FF;
+    size_t pd_idx   = (virt >> 21) & 0x1FF;
+    size_t pt_idx   = (virt >> 12) & 0x1FF;
+
+    if (!(pml4[pml4_idx] & VMM_FLAG_PRESENT)) return 0;
+    uint64_t* pdpt = (uint64_t*)(pml4[pml4_idx] & ~0xFFFULL);
+
+    if (!(pdpt[pdpt_idx] & VMM_FLAG_PRESENT)) return 0;
+    uint64_t* pd = (uint64_t*)(pdpt[pdpt_idx] & ~0xFFFULL);
+
+    if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return 0;
+    if (pd[pd_idx] & VMM_FLAG_HUGE) {
+        return (pd[pd_idx] & ~0x1FFFFFULL) + (virt & 0x1FFFFFULL);
+    }
+
+    uint64_t* pt = (uint64_t*)(pd[pd_idx] & ~0xFFFULL);
+    if (!(pt[pt_idx] & VMM_FLAG_PRESENT)) return 0;
+
+    return (pt[pt_idx] & ~0xFFFULL) + (virt & 0xFFFULL);
 }
 
 } // namespace kernel

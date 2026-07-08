@@ -33,9 +33,9 @@ static void register_region(uint64_t base, uint64_t len, uint64_t guard_start, u
     uint64_t kern_end = (uint64_t)_kernel_end;
 
     // Align base up to 4KB page boundary
-    uint64_t start = (base + 0xFFFUL) & ~0xFFFUL;
+    uint64_t start = (base + 0xFFFULL) & ~0xFFFULL;
     // Align end down to 4KB page boundary
-    uint64_t end = (base + len) & ~0xFFFUL;
+    uint64_t end = (base + len) & ~0xFFFULL;
 
     for (uint64_t frame = start; frame < end; frame += 4096) {
         // Guard low memory region below 1MB (BIOS data, bootloader, stack)

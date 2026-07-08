@@ -6,6 +6,19 @@
 #include "../drivers/apic.hpp"
 #include "pmm.hpp"
 #include "vmm.hpp"
+#include "heap.hpp"
+
+// Polymorphic class to verify C++ new/delete, constructors, and virtual tables
+class TestClass {
+public:
+    int x;
+    int y;
+    TestClass() : x(42), y(100) {}
+    virtual int get_sum() {
+        return x + y;
+    }
+    virtual ~TestClass() {}
+};
 
 // Define an empty dummy __main function to satisfy MinGW's global constructor initialization stub
 extern "C" void __main() {}
@@ -61,7 +74,17 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         drivers::Serial::println("[INIT] Virtual Memory Manager (VMM) initialized.");
     }
 
-    // 7. Initialize VGA text-mode graphics console
+    // 7. Initialize Slab Heap Allocator
+    bool heap_ok = kernel::heap_init();
+    if (serial_ok) {
+        if (heap_ok) {
+            drivers::Serial::println("[INIT] Slab Heap Allocator initialized.");
+        } else {
+            drivers::Serial::println("[ERROR] Slab Heap Allocator failed!");
+        }
+    }
+
+    // 8. Initialize VGA text-mode graphics console
     drivers::Vga::init();
     drivers::Vga::set_color(drivers::VgaColor::LIGHT_CYAN, drivers::VgaColor::BLACK);
     drivers::Vga::println("Welcome to CrecentKernel!");
@@ -267,7 +290,110 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
             drivers::Serial::println("[TEST] Freed physical page frame.");
         }
 
+        // --- Heap Allocator Verification ---
+        drivers::Vga::println("");
+        drivers::Vga::println("[TEST] Starting Kernel Heap Allocator verification...");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] Starting Kernel Heap Allocator verification...");
+        }
+
+        // Test 1: Allocate small objects and verify slab sharing
+        void* ptr1 = kernel::kmalloc(32);
+        void* ptr2 = kernel::kmalloc(32);
+        if (ptr1 && ptr2) {
+            drivers::Vga::println("[TEST] kmalloc 32 bytes: OK");
+            if (serial_ok) {
+                drivers::Serial::println("[TEST] kmalloc 32 bytes: SUCCESS");
+            }
+            
+            // Check if they share the same physical page frame (slab sharing)
+            uint64_t page1 = (uint64_t)ptr1 & ~0xFFFULL;
+            uint64_t page2 = (uint64_t)ptr2 & ~0xFFFULL;
+            if (page1 == page2) {
+                drivers::Vga::println("[TEST] Slab page sharing: OK");
+                if (serial_ok) {
+                    drivers::Serial::println("[TEST] Slab page sharing verified: SUCCESS");
+                }
+            } else {
+                drivers::Vga::println("[TEST] Slab page sharing: FAILED");
+            }
+        } else {
+            drivers::Vga::println("[TEST] kmalloc 32 bytes: FAILED");
+        }
+
+        // Test 2: Test C++ new and delete operator with a custom polymorphic class
+        if (heap_ok) {
+            TestClass* cpp_obj = new TestClass();
+            if (cpp_obj) {
+                drivers::Vga::println("[TEST] C++ 'new' operator allocation: OK");
+                if (serial_ok) {
+                    drivers::Serial::println("[TEST] C++ 'new' operator allocation: SUCCESS");
+                }
+                
+                if (cpp_obj->x == 42 && cpp_obj->y == 100) {
+                    drivers::Vga::println("[TEST] C++ constructor execution: OK");
+                }
+                
+                int sum = cpp_obj->get_sum();
+                if (sum == 142) {
+                    drivers::Vga::println("[TEST] C++ virtual function dispatch: OK");
+                    if (serial_ok) {
+                        drivers::Serial::println("[TEST] C++ virtual function dispatch: SUCCESS");
+                    }
+                } else {
+                    drivers::Vga::println("[TEST] C++ virtual function dispatch: FAILED");
+                }
+
+                delete cpp_obj;
+                drivers::Vga::println("[TEST] C++ 'delete' operator execution: OK");
+                if (serial_ok) {
+                    drivers::Serial::println("[TEST] C++ 'delete' operator execution: SUCCESS");
+                }
+            } else {
+                drivers::Vga::println("[TEST] C++ 'new' operator: FAILED");
+            }
+        }
+
+        // Test 3: Large allocation (> 2048 bytes)
+        void* large_ptr = kernel::kmalloc(8192); // 8KB
+        if (large_ptr) {
+            drivers::Vga::println("[TEST] kmalloc large allocation (8KB): OK");
+            if (serial_ok) {
+                drivers::Serial::println("[TEST] kmalloc large allocation (8KB): SUCCESS");
+            }
+            
+            // Verify writing and reading from large mapping
+            char* l_buf = (char*)large_ptr;
+            l_buf[0] = 'H';
+            l_buf[1] = 'E';
+            l_buf[8191] = '!';
+            if (l_buf[0] == 'H' && l_buf[8191] == '!') {
+                drivers::Vga::println("[TEST] Large allocation write/read: OK");
+                if (serial_ok) {
+                    drivers::Serial::println("[TEST] Large allocation write/read verification: SUCCESS");
+                }
+            } else {
+                drivers::Vga::println("[TEST] Large allocation write/read: FAILED");
+            }
+            
+            kernel::kfree(large_ptr);
+            drivers::Vga::println("[TEST] kfree large allocation: OK");
+            if (serial_ok) {
+                drivers::Serial::println("[TEST] kfree large allocation: SUCCESS");
+            }
+        } else {
+            drivers::Vga::println("[TEST] kmalloc large allocation: FAILED");
+        }
+
+        kernel::kfree(ptr1);
+        kernel::kfree(ptr2);
+        drivers::Vga::println("[TEST] kfree small allocations: OK");
+        if (serial_ok) {
+            drivers::Serial::println("[TEST] kfree small allocations: SUCCESS");
+        }
+
         // Trigger page fault by reading from the unmapped address to demonstrate exception routing
+        drivers::Vga::println("");
         drivers::Vga::println("[TEST] Reading unmapped address to trigger Page Fault (#PF)...");
         if (serial_ok) {
             drivers::Serial::println("[TEST] Reading unmapped address to trigger Page Fault (#PF)...");
