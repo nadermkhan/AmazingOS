@@ -180,6 +180,37 @@ void user_bootstrap_thread(void* arg) {
 
 volatile bool gui_demo_complete = false;
 
+inline uint64_t rdtsc() {
+    uint32_t low, high;
+    __asm__ __volatile__ ("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+}
+
+static uint64_t calibrate_tsc() {
+    // Enable PIT Channel 2 gate
+    drivers::outb(0x61, (drivers::inb(0x61) & 0xFD) | 1);
+    
+    // Configure PIT Channel 2 to LSB/MSB one-shot mode (Mode 0)
+    drivers::outb(0x43, 0xB0);
+    
+    // Set reload value for 10ms (11932 ticks at 1.193182 MHz)
+    uint16_t reload = 11932;
+    drivers::outb(0x42, reload & 0xFF);
+    drivers::outb(0x42, reload >> 8);
+    
+    uint64_t start = rdtsc();
+    
+    // Loop until PIT output bit 5 goes high (timeout reached)
+    while (!(drivers::inb(0x61) & 0x20));
+    
+    uint64_t end = rdtsc();
+    
+    // Disable PIT Channel 2 gate
+    drivers::outb(0x61, drivers::inb(0x61) & 0xFC);
+    
+    return end - start;
+}
+
 // GUI Compositor & Window Manager verification thread
 void gui_demo_thread(void* arg) {
     (void)arg;
@@ -204,7 +235,7 @@ void gui_demo_thread(void* arg) {
     wm::WindowManager::create_window(250, 220, 400, 240, "Performance Monitor", 0x002D3748); // Dark Charcoal
 
     // Draw initial desktop frame
-    wm::WindowManager::draw_desktop();
+    wm::WindowManager::force_redraw_all();
 
     // 4. Verify IDT Interrupt Gate Routing for Vectors 33 & 44
     drivers::Serial::println("[DEMO] Verifying Interrupt Gate routing for Keyboard (Vector 33)...");
@@ -281,10 +312,36 @@ void gui_demo_thread(void* arg) {
     }
 
     drivers::Serial::println("[DEMO] Window Composer Drag Verification Complete - SUCCESS");
+    
+    // Calibrate TSC cycles per frame (60 FPS = 16.6 ms)
+    uint64_t tsc_10ms = calibrate_tsc();
+    uint64_t tsc_per_frame = (tsc_10ms * 166) / 100;
+    
+    drivers::Serial::print("[DEMO] TSC Frequency calibrated: ");
+    char freq_buf[16];
+    uint64_t mhz = tsc_10ms / 10000;
+    int f_idx = 0;
+    if (mhz == 0) freq_buf[f_idx++] = '0';
+    else {
+        char rev[16];
+        int r_idx = 0;
+        uint64_t val = mhz;
+        while (val > 0) {
+            rev[r_idx++] = '0' + (val % 10);
+            val /= 10;
+        }
+        while (r_idx > 0) freq_buf[f_idx++] = rev[--r_idx];
+    }
+    freq_buf[f_idx] = '\0';
+    drivers::Serial::print(freq_buf);
+    drivers::Serial::println(" MHz.");
+
     drivers::Serial::println("[DEMO] Entering interactive desktop loop. You can now move mouse / drag windows freely.");
 
-    // 7. Compositor Refresh & Polling Loop
+    // 7. Compositor Refresh & Polling Loop (TSC-Budget Locked to 60 FPS)
     while (true) {
+        uint64_t start_time = rdtsc();
+
         // Poll mouse coordinates
         if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
             cursor_x += m_dx;
@@ -308,8 +365,10 @@ void gui_demo_thread(void* arg) {
 
         wm::WindowManager::draw_desktop();
         
-        for (volatile int delay = 0; delay < 2000000; ) {
-            delay = delay + 1;
+        // Wait out the remainder of our 16.6ms budget via low-power hlt context yields
+        uint64_t target_tsc = start_time + tsc_per_frame;
+        while (rdtsc() < target_tsc) {
+            __asm__ __volatile__ ("hlt");
         }
     }
 }

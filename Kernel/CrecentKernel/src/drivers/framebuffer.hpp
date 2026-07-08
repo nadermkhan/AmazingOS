@@ -34,6 +34,8 @@ public:
     
     // Core drawing primitives
     static void draw_pixel(uint32_t x, uint32_t y, uint32_t color);
+    static uint32_t get_pixel(uint32_t x, uint32_t y);
+    static void draw_pixel_physical(uint32_t x, uint32_t y, uint32_t color);
     static void draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
     static void draw_line(int x0, int y0, int x1, int y1, uint32_t color);
     static void draw_char(char c, uint32_t x, uint32_t y, uint32_t color);
@@ -42,6 +44,7 @@ public:
     // Double buffering blit routines
     static void swap_buffers();
     static void swap_dirty_rect(Rect r);
+    static void swap_dirty_rect_fast(Rect r);
     
     // Dimension getters
     static uint32_t get_width() { return width; }

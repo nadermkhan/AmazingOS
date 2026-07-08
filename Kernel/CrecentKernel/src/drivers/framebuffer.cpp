@@ -102,6 +102,16 @@ void Framebuffer::draw_pixel(uint32_t x, uint32_t y, uint32_t color) {
     back_buffer[y * (pitch / 4) + x] = color;
 }
 
+uint32_t Framebuffer::get_pixel(uint32_t x, uint32_t y) {
+    if (!initialized || x >= width || y >= height) return 0;
+    return back_buffer[y * (pitch / 4) + x];
+}
+
+void Framebuffer::draw_pixel_physical(uint32_t x, uint32_t y, uint32_t color) {
+    if (!initialized || x >= width || y >= height) return;
+    virtual_base[y * (pitch / 4) + x] = color;
+}
+
 void Framebuffer::draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
     uint32_t end_x = x + w;
     uint32_t end_y = y + h;
@@ -195,6 +205,40 @@ void Framebuffer::swap_dirty_rect(Rect r) {
         uint32_t offset = y * pitch_words;
         for (int x = x0; x < x1; ++x) {
             virtual_base[offset + x] = back_buffer[offset + x];
+        }
+    }
+}
+
+void Framebuffer::swap_dirty_rect_fast(Rect r) {
+    if (!initialized) return;
+
+    // Boundary containment checks
+    int x0 = r.x; if (x0 < 0) x0 = 0;
+    int y0 = r.y; if (y0 < 0) y0 = 0;
+    int x1 = r.x + r.w; if (x1 > (int)width) x1 = width;
+    int y1 = r.y + r.h; if (y1 > (int)height) y1 = height;
+    
+    if (x0 >= x1 || y0 >= y1) return;
+
+    uint32_t pitch_words = pitch / 4;
+    for (int y = y0; y < y1; ++y) {
+        uint32_t line_offset = y * pitch_words;
+        uint32_t* src = &back_buffer[line_offset + x0];
+        uint32_t* dest = &virtual_base[line_offset + x0];
+        
+        // Fast row-level block copy using uint64_t transfers (2 pixels per instruction)
+        uint32_t words_to_copy = x1 - x0;
+        uint32_t quads_to_copy = words_to_copy / 2;
+        uint64_t* src_q = (uint64_t*)src;
+        uint64_t* dest_q = (uint64_t*)dest;
+        
+        for (uint32_t i = 0; i < quads_to_copy; ++i) {
+            dest_q[i] = src_q[i];
+        }
+        
+        // Copy leftover pixel if width was odd
+        if (words_to_copy % 2) {
+            dest[words_to_copy - 1] = src[words_to_copy - 1];
         }
     }
 }

@@ -26,17 +26,22 @@ private:
     static int next_window_id;
     static int mouse_x;
     static int mouse_y;
+    static int last_mouse_x;
+    static int last_mouse_y;
     static bool mouse_pressed;
     static Window* active_window;
     static int drag_offset_x;
     static int drag_offset_y;
 
     static void focus_window(Window* win);
+    static void draw_cursor();
+    static void erase_cursor();
 
 public:
     static void init();
     static Window* create_window(int x, int y, int w, int h, const char* title, uint32_t color);
     static void draw_desktop();
+    static void force_redraw_all();
     static void handle_mouse_move(int new_x, int new_y, bool pressed);
     
     static int get_mouse_x() { return mouse_x; }
