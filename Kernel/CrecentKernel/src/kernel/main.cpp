@@ -281,7 +281,7 @@ void gui_demo_thread(void* arg) {
     }
 
     drivers::Serial::println("[DEMO] Window Composer Drag Verification Complete - SUCCESS");
-    gui_demo_complete = true;
+    drivers::Serial::println("[DEMO] Entering interactive desktop loop. You can now move mouse / drag windows freely.");
 
     // 7. Compositor Refresh & Polling Loop
     while (true) {
@@ -298,6 +298,12 @@ void gui_demo_thread(void* arg) {
             char str[2] = {key_char, '\0'};
             drivers::Serial::print(str);
             drivers::Serial::println("'");
+
+            // Exit requested by typing 'q'
+            if (key_char == 'q' || key_char == 'Q') {
+                drivers::Serial::println("[DEMO] Exit requested. Triggering final tests...");
+                gui_demo_complete = true;
+            }
         }
 
         wm::WindowManager::draw_desktop();

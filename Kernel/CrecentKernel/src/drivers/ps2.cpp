@@ -102,15 +102,16 @@ void Ps2::init() {
     
     Serial::println("[INIT] Configuring 8042 PS/2 controller...");
     
-    // 1. Enable mouse auxiliary port
-    write_cmd(0xA8);
+    // 1. Enable keyboard and mouse ports
+    write_cmd(0xAE); // Enable keyboard
+    write_cmd(0xA8); // Enable mouse auxiliary port
     
     // 2. Read Controller Configuration Byte (CCB)
     write_cmd(0x20);
     uint8_t ccb = read_data();
     
     // Enable mouse interrupt (bit 1), keyboard interrupt (bit 0)
-    // Enable mouse clock (clear bit 5), enable keyboard clock (clear bit 4)
+    // Enable clock lines (clear bits 4 and 5)
     ccb |= 0x03;
     ccb &= ~0x30;
     
@@ -118,21 +119,40 @@ void Ps2::init() {
     write_cmd(0x60);
     write_data(ccb);
     
-    // 4. Send enable data reporting command to mouse
+    // 4. Reset mouse device to ensure standard reporting mode
+    write_cmd(0xD4); // Redirect next write to mouse
+    write_data(0xFF); // Reset Command
+    uint8_t ack = read_data();
+    uint8_t self_test = read_data();
+    uint8_t dev_id = read_data();
+    (void)ack;
+    (void)self_test;
+    (void)dev_id;
+    
+    // 5. Load default mouse configurations
+    write_cmd(0xD4);
+    write_data(0xF6); // Set defaults
+    read_data(); // ACK
+    
+    // 6. Enable data streaming
     write_cmd(0xD4); // Redirect next write to auxiliary mouse device
     write_data(0xF4); // Enable mouse reporting
     
-    // Read mouse ACK response (0xFA)
-    uint8_t ack = read_data();
-    if (ack == 0xFA) {
+    uint8_t stream_ack = read_data();
+    if (stream_ack == 0xFA) {
         Serial::println("[INIT] PS/2 Mouse data streaming enabled successfully.");
     } else {
         Serial::print("[INIT] WARNING: PS/2 Mouse streaming ACK failed: ");
         char buf[8];
-        buf[0] = "0123456789ABCDEF"[(ack >> 4) & 0x0F];
-        buf[1] = "0123456789ABCDEF"[ack & 0x0F];
+        buf[0] = "0123456789ABCDEF"[(stream_ack >> 4) & 0x0F];
+        buf[1] = "0123456789ABCDEF"[stream_ack & 0x0F];
         buf[2] = '\0';
         Serial::println(buf);
+    }
+
+    // 7. Flush any leftover command bytes or responses from buffers
+    while (inb(PS2_STATUS_PORT) & 1) {
+        inb(PS2_DATA_PORT);
     }
 }
 
