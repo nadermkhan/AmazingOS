@@ -20,4 +20,11 @@ void pmm_free_frame(uint64_t frame);
 // Return the total number of free page frames in the PMM pool
 size_t pmm_get_free_frames_count();
 
+// Retrieve the physical memory bounds of a loaded Multiboot module
+// index: Index of the module (0 for first module)
+// start: Output parameter for the start address
+// end: Output parameter for the end address
+// Returns true if module exists, false otherwise
+bool pmm_get_module(uint32_t index, uint64_t* start, uint64_t* end);
+
 } // namespace kernel

@@ -1,6 +1,7 @@
 #include "../drivers/serial.hpp"
 #include "../drivers/vga.hpp"
 #include "../fs/vfs.hpp"
+#include "../fs/tarfs.hpp"
 #include "gdt.hpp"
 #include "idt.hpp"
 #include "../drivers/apic.hpp"
@@ -147,6 +148,19 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
     drivers::Vga::println("[VFS] Virtual File System initialized.");
     if (serial_ok) {
         drivers::Serial::println("[INIT] VFS root directory '/' registered.");
+    }
+
+    // Initialize TarFS if the module is found in the physical memory manager
+    {
+        uint64_t tar_start = 0, tar_end = 0;
+        bool tar_found = kernel::pmm_get_module(0, &tar_start, &tar_end);
+        if (tar_found) {
+            fs::tarfs_init(tar_start, tar_end);
+        } else {
+            if (serial_ok) {
+                drivers::Serial::println("[TarFS] Error: No Multiboot modules found!");
+            }
+        }
     }
 
     // 9. Create and mount a mock file, write test data, and verify by reading back
@@ -428,6 +442,65 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         drivers::Vga::println("[TEST] kfree small allocations: OK");
         if (serial_ok) {
             drivers::Serial::println("[TEST] kfree small allocations: SUCCESS");
+        }
+
+        // --- TarFS Verification ---
+        uint64_t t_start = 0, t_end = 0;
+        if (kernel::pmm_get_module(0, &t_start, &t_end)) {
+            drivers::Vga::println("");
+            drivers::Vga::println("[TEST] Starting VFS TarFS verification...");
+            if (serial_ok) {
+                drivers::Serial::println("[TEST] Starting VFS TarFS verification...");
+            }
+
+            fs::VFSNode* hello_node = fs::VFS::open("/tar/hello.txt");
+            if (hello_node) {
+                char buf[128];
+                fs::File f = { hello_node, 0, 0 };
+                ssize_t read_bytes = fs::VFS::read(&f, buf, sizeof(buf) - 1);
+                if (read_bytes > 0) {
+                    buf[read_bytes] = '\0';
+                    drivers::Vga::print("Read /tar/hello.txt: \"");
+                    drivers::Vga::print(buf);
+                    drivers::Vga::println("\" - SUCCESS");
+
+                    drivers::Serial::print("[TEST] Read /tar/hello.txt: \"");
+                    drivers::Serial::print(buf);
+                    drivers::Serial::println("\" - SUCCESS");
+                }
+            } else {
+                drivers::Vga::println("[TEST] Failed to open /tar/hello.txt - FAILED");
+                drivers::Serial::println("[TEST] Failed to open /tar/hello.txt - FAILED");
+            }
+
+            fs::VFSNode* info_node = fs::VFS::open("/tar/docs/info.txt");
+            if (info_node) {
+                char buf[128];
+                fs::File f = { info_node, 0, 0 };
+                ssize_t read_bytes = fs::VFS::read(&f, buf, sizeof(buf) - 1);
+                if (read_bytes > 0) {
+                    buf[read_bytes] = '\0';
+                    drivers::Vga::print("Read /tar/docs/info.txt: \"");
+                    drivers::Vga::print(buf);
+                    drivers::Vga::println("\" - SUCCESS");
+
+                    drivers::Serial::print("[TEST] Read /tar/docs/info.txt: \"");
+                    drivers::Serial::print(buf);
+                    drivers::Serial::println("\" - SUCCESS");
+                }
+            } else {
+                drivers::Vga::println("[TEST] Failed to open /tar/docs/info.txt - FAILED");
+                drivers::Serial::println("[TEST] Failed to open /tar/docs/info.txt - FAILED");
+            }
+
+            // Test non-existent file path
+            fs::VFSNode* missing = fs::VFS::open("/tar/missing.txt");
+            if (!missing) {
+                drivers::Vga::println("Open non-existent file /tar/missing.txt returned null - SUCCESS");
+                drivers::Serial::println("[TEST] Open non-existent file /tar/missing.txt returned null - SUCCESS");
+            } else {
+                drivers::Vga::println("Open /tar/missing.txt failed - FAILED");
+            }
         }
 
         // --- Multitasking Verification ---

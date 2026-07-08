@@ -4,13 +4,34 @@ namespace fs {
 
 // Static member definitions
 VFSNode VFS::root_node;
-FileSystem VFS::root_fs;
 VFSNode VFS::child_nodes[VFS::MAX_NODES];
 size_t VFS::node_count = 0;
 
+MountPoint VFS::mounts[VFS::MAX_MOUNTS];
+size_t VFS::mount_count = 0;
+
 namespace {
 
-// Internal helper: string equality check (since std::strcmp is not available)
+// Internal helper: string length
+size_t str_len(const char* s) {
+    if (!s) return 0;
+    size_t len = 0;
+    while (s[len]) len++;
+    return len;
+}
+
+// Internal helper: string prefix match
+bool str_starts_with(const char* str, const char* prefix) {
+    if (!str || !prefix) return false;
+    size_t i = 0;
+    while (prefix[i]) {
+        if (str[i] != prefix[i]) return false;
+        i++;
+    }
+    return true;
+}
+
+// Internal helper: string equality check
 bool str_equal(const char* s1, const char* s2) {
     if (!s1 || !s2) return false;
     while (*s1 && *s2) {
@@ -31,7 +52,7 @@ void str_copy(char* dest, const char* src, size_t max_len) {
     dest[i] = '\0';
 }
 
-// Memory-backed VFSNode read implementation
+// Memory-backed VFSNode read implementation (legacy ramFS mock)
 ssize_t ram_read(VFSNode* node, size_t offset, void* buffer, size_t count) {
     if (!node || !buffer || !node->data) return -1;
     if (offset >= node->size) return 0;
@@ -47,7 +68,7 @@ ssize_t ram_read(VFSNode* node, size_t offset, void* buffer, size_t count) {
     return (ssize_t)count;
 }
 
-// Memory-backed VFSNode write implementation
+// Memory-backed VFSNode write implementation (legacy ramFS mock)
 ssize_t ram_write(VFSNode* node, size_t offset, const void* buffer, size_t count) {
     if (!node || !buffer || !node->data) return -1;
     if (offset >= node->capacity) return 0;
@@ -68,7 +89,7 @@ ssize_t ram_write(VFSNode* node, size_t offset, const void* buffer, size_t count
     return (ssize_t)count;
 }
 
-// Root directory finddir implementation to locate children by name
+// Root directory finddir implementation to locate children by name (legacy ramFS mock)
 VFSNode* finddir_root(VFSNode* node, const char* name) {
     if (!node || node->type != NodeType::DIRECTORY) return nullptr;
     for (size_t i = 0; i < VFS::node_count; ++i) {
@@ -92,17 +113,28 @@ bool VFS::init() {
     root_node.write = nullptr;
     root_node.finddir = finddir_root;
 
-    // Register FS representation
-    root_fs.name = "RootFS";
-    root_fs.root = &root_node;
-
     node_count = 0;
+    mount_count = 0;
+
+    // Register legacy root mount "/"
+    register_mount("/", &root_node);
+
+    return true;
+}
+
+bool VFS::register_mount(const char* path, VFSNode* root) {
+    if (!path || !root || mount_count >= MAX_MOUNTS) {
+        return false;
+    }
+    MountPoint& m = mounts[mount_count++];
+    str_copy(m.path, path, sizeof(m.path));
+    m.path_len = str_len(m.path);
+    m.root_node = root;
     return true;
 }
 
 const char* VFS::parse_filename(const char* path) {
     if (!path) return nullptr;
-    // For a minimal flat FS, we strip the leading slash
     if (path[0] == '/') {
         return path + 1;
     }
@@ -110,20 +142,50 @@ const char* VFS::parse_filename(const char* path) {
 }
 
 VFSNode* VFS::open(const char* path) {
-    if (!path) return nullptr;
+    if (!path || path[0] == '\0') return nullptr;
 
-    // Direct root access
-    if (str_equal(path, "/")) {
-        return &root_node;
+    // 1. Longest-prefix mount point match
+    int matched_idx = -1;
+    size_t longest_len = 0;
+
+    for (size_t i = 0; i < mount_count; ++i) {
+        if (str_starts_with(path, mounts[i].path)) {
+            size_t len = mounts[i].path_len;
+            
+            // Check boundary: prefix must match path boundary (e.g. "/tar" shouldn't match "/target")
+            // A match is valid if the prefix is "/" or prefix matches exactly or next character in path is '/'
+            if (len == 1 || path[len] == '\0' || path[len] == '/') {
+                if (len > longest_len) {
+                    longest_len = len;
+                    matched_idx = (int)i;
+                }
+            }
+        }
     }
 
-    // Parse filename relative to the root directory
-    const char* filename = parse_filename(path);
-    if (!filename || filename[0] == '\0') {
+    if (matched_idx == -1) {
         return nullptr;
     }
 
-    return root_node.finddir(&root_node, filename);
+    MountPoint& m = mounts[matched_idx];
+    
+    // Extract subpath relative to mount root
+    const char* subpath = path + m.path_len;
+    while (subpath[0] == '/') {
+        subpath++; // Skip leading slashes
+    }
+
+    // If subpath is empty, we refer to the mounted root node itself
+    if (subpath[0] == '\0') {
+        return m.root_node;
+    }
+
+    // Dispatch lookup recursively to mounted root node's finddir
+    if (m.root_node->finddir) {
+        return m.root_node->finddir(m.root_node, subpath);
+    }
+
+    return nullptr;
 }
 
 VFSNode* VFS::create_file(const char* path, char* buffer_ptr, size_t capacity) {
@@ -136,7 +198,7 @@ VFSNode* VFS::create_file(const char* path, char* buffer_ptr, size_t capacity) {
     VFSNode* existing = open(path);
     if (existing) return existing;
 
-    // Allocate from static pool
+    // Allocate from static pool (legacy ramFS mock)
     VFSNode* new_node = &child_nodes[node_count++];
     str_copy(new_node->name, filename, sizeof(new_node->name));
     new_node->type = NodeType::FILE;
@@ -151,21 +213,25 @@ VFSNode* VFS::create_file(const char* path, char* buffer_ptr, size_t capacity) {
 }
 
 ssize_t VFS::read(File* file, void* buffer, size_t count) {
-    if (!file || !file->node || !file->node->read) return -1;
-    ssize_t bytes_read = file->node->read(file->node, file->offset, buffer, count);
-    if (bytes_read > 0) {
-        file->offset += (size_t)bytes_read;
+    if (!file || !file->node || !buffer) return -1;
+    if (!file->node->read) return -1;
+
+    ssize_t bytes = file->node->read(file->node, file->offset, buffer, count);
+    if (bytes > 0) {
+        file->offset += bytes;
     }
-    return bytes_read;
+    return bytes;
 }
 
 ssize_t VFS::write(File* file, const void* buffer, size_t count) {
-    if (!file || !file->node || !file->node->write) return -1;
-    ssize_t bytes_written = file->node->write(file->node, file->offset, buffer, count);
-    if (bytes_written > 0) {
-        file->offset += (size_t)bytes_written;
+    if (!file || !file->node || !buffer) return -1;
+    if (!file->node->write) return -1;
+
+    ssize_t bytes = file->node->write(file->node, file->offset, buffer, count);
+    if (bytes > 0) {
+        file->offset += bytes;
     }
-    return bytes_written;
+    return bytes;
 }
 
 } // namespace fs

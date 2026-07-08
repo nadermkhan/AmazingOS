@@ -9,6 +9,12 @@ namespace kernel {
 static uint64_t free_list_head = 0;
 static size_t free_frames_count = 0;
 
+// Multiboot Module tracking arrays
+static constexpr size_t MAX_MODULES = 4;
+static uint64_t module_starts[MAX_MODULES];
+static uint64_t module_ends[MAX_MODULES];
+static size_t module_count = 0;
+
 struct Mboot1MmapEntry {
     uint32_t size;
     uint64_t addr;
@@ -16,9 +22,24 @@ struct Mboot1MmapEntry {
     uint32_t type;
 } __attribute__((packed));
 
+struct Mboot1Module {
+    uint32_t mod_start;
+    uint32_t mod_end;
+    uint32_t cmdline;
+    uint32_t pad;
+} __attribute__((packed));
+
 struct Mboot2Tag {
     uint32_t type;
     uint32_t size;
+};
+
+struct Mboot2ModuleTag {
+    uint32_t type;
+    uint32_t size;
+    uint32_t mod_start;
+    uint32_t mod_end;
+    char string[1];
 };
 
 struct Mboot2MmapEntry {
@@ -48,6 +69,17 @@ static void register_region(uint64_t base, uint64_t len, uint64_t guard_start, u
         }
         // Guard Multiboot Information structure space
         if (frame >= guard_start && frame < guard_end) {
+            continue;
+        }
+        // Guard loaded modules (e.g. TarFS archive)
+        bool in_module = false;
+        for (size_t i = 0; i < module_count; ++i) {
+            if (frame >= module_starts[i] && frame < module_ends[i]) {
+                in_module = true;
+                break;
+            }
+        }
+        if (in_module) {
             continue;
         }
 
@@ -108,9 +140,74 @@ static void parse_multiboot2(uint64_t maddr) {
     }
 }
 
+static void print_hex(uint64_t val) {
+    char buf[19];
+    buf[0] = '0';
+    buf[1] = 'x';
+    const char* hex_chars = "0123456789ABCDEF";
+    for (int i = 0; i < 16; ++i) {
+        buf[2 + i] = hex_chars[(val >> ((15 - i) * 4)) & 0x0F];
+    }
+    buf[18] = '\0';
+    drivers::Serial::print(buf);
+}
+
+static void pmm_find_modules(uint32_t magic, uint64_t maddr) {
+    module_count = 0;
+    if (magic == 0x2badb002) { // Multiboot1
+        uint32_t flags = *(uint32_t*)maddr;
+        if (flags & (1 << 3)) {
+            uint32_t mods_count = *(uint32_t*)(maddr + 20);
+            uint32_t mods_addr = *(uint32_t*)(maddr + 24);
+            
+            for (uint32_t i = 0; i < mods_count && i < MAX_MODULES; ++i) {
+                Mboot1Module* mod = (Mboot1Module*)(uintptr_t)(mods_addr + i * sizeof(Mboot1Module));
+                module_starts[module_count] = mod->mod_start;
+                module_ends[module_count] = mod->mod_end;
+                module_count++;
+                
+                drivers::Serial::print("[PMM] Found Multiboot1 Module: ");
+                print_hex(mod->mod_start);
+                drivers::Serial::print(" - ");
+                print_hex(mod->mod_end);
+                drivers::Serial::println("");
+            }
+        }
+    } else if (magic == 0x36d76289) { // Multiboot2
+        uint32_t total_size = *(uint32_t*)maddr;
+        uint64_t mbi_end = maddr + total_size;
+        uintptr_t curr = maddr + 8;
+        
+        while (curr < mbi_end) {
+            Mboot2Tag* tag = (Mboot2Tag*)curr;
+            if (tag->type == 0 && tag->size == 8) {
+                break;
+            }
+            if (tag->type == 3) { // Module tag
+                Mboot2ModuleTag* mod = (Mboot2ModuleTag*)curr;
+                if (module_count < MAX_MODULES) {
+                    module_starts[module_count] = mod->mod_start;
+                    module_ends[module_count] = mod->mod_end;
+                    module_count++;
+                    
+                    drivers::Serial::print("[PMM] Found Multiboot2 Module: ");
+                    print_hex(mod->mod_start);
+                    drivers::Serial::print(" - ");
+                    print_hex(mod->mod_end);
+                    drivers::Serial::println("");
+                }
+            }
+            curr += (tag->size + 7) & ~7;
+        }
+    }
+}
+
 bool pmm_init(uint32_t magic, uint64_t maddr) {
     free_list_head = 0;
     free_frames_count = 0;
+
+    // Pre-parse modules to guard their memory blocks before registering RAM
+    pmm_find_modules(magic, maddr);
 
     if (magic == 0x2badb002) {
         drivers::Serial::println("[PMM] Parsing Multiboot1 memory map...");
@@ -162,6 +259,15 @@ void pmm_free_frame(uint64_t frame) {
 
 size_t pmm_get_free_frames_count() {
     return free_frames_count;
+}
+
+bool pmm_get_module(uint32_t index, uint64_t* start, uint64_t* end) {
+    if (index < module_count) {
+        *start = module_starts[index];
+        *end = module_ends[index];
+        return true;
+    }
+    return false;
 }
 
 } // namespace kernel
