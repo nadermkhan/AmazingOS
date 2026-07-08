@@ -57,6 +57,10 @@ static bool safari_search_active = false;
 static bool safari_focused_address = false;
 static bool safari_focused_search = true;
 
+static bool is_resizing_window = false;
+static int resize_start_w = 0;
+static int resize_start_h = 0;
+
 struct LinkHitbox {
     Rect rect;
     char target[128];
@@ -493,6 +497,21 @@ void WindowManager::draw_window_body(Window* win, uint8_t alpha, bool is_termina
     drivers::Framebuffer::draw_rect_alpha(
         r.x + 1, r.y + TITLE_BAR_HEIGHT, r.w - 2, r.h - TITLE_BAR_HEIGHT - 12,
         win->bg_color, body_alpha);
+
+    // Resize grip affordance (bottom-right corner dots)
+    if (!win->is_maximized && !win->is_minimized) {
+        int rx = r.x + r.w - 14;
+        int ry = r.y + r.h - 14;
+        uint32_t grip_c = dark_mode ? 0x00475569 : 0x00B0B0B0;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j <= i; j++) {
+                drivers::Framebuffer::draw_pixel(rx + j*4, ry - (i-j)*4, grip_c);
+                drivers::Framebuffer::draw_pixel(rx + j*4 + 1, ry - (i-j)*4, grip_c);
+                drivers::Framebuffer::draw_pixel(rx + j*4, ry - (i-j)*4 + 1, grip_c);
+                drivers::Framebuffer::draw_pixel(rx + j*4 + 1, ry - (i-j)*4 + 1, grip_c);
+            }
+        }
+    }
 }
 
 void WindowManager::draw_terminal_content(Window* win) {
@@ -1237,37 +1256,30 @@ void Window::draw(bool is_active) {
     bool is_terminal = this->title_is("Terminal");
     WindowManager::draw_window_body(this, alpha, is_terminal);
 
-    if (this->is_dragging) {
-        // Only the actively dragged window shows simplified content
-        int cx = rect.x + rect.w / 2;
-        int cy = rect.y + rect.h / 2;
-        WindowManager::draw_string("Moving...", cx - 30, cy, C_TEXT, 13.0f);
+    if (is_terminal) {
+        WindowManager::draw_terminal_content(this);
+    } else if (this->title_is("Finder")) {
+        WindowManager::draw_finder_content(this);
+    } else if (this->title_is("System Log")) {
+        WindowManager::draw_system_log_content(this);
+    } else if (this->title_is("Performance Monitor")) {
+        WindowManager::draw_perf_monitor_content(this);
+    } else if (this->title_is("About This Mac")) {
+        WindowManager::draw_about_content(this);
+    } else if (this->title_is("Safari")) {
+        WindowManager::draw_safari_content(this);
+    } else if (this->title_is("Mail")) {
+        WindowManager::draw_mail_content(this);
+    } else if (this->title_is("App Store")) {
+        WindowManager::draw_appstore_content(this);
+    } else if (this->title_is("Notes")) {
+        WindowManager::draw_notes_content(this);
+    } else if (this->title_starts_with("Code Editor")) {
+        WindowManager::draw_code_editor_content(this);
+    } else if (this->title_is("System Settings")) {
+        WindowManager::draw_settings_content(this);
     } else {
-        if (is_terminal) {
-            WindowManager::draw_terminal_content(this);
-        } else if (this->title_is("Finder")) {
-            WindowManager::draw_finder_content(this);
-        } else if (this->title_is("System Log")) {
-            WindowManager::draw_system_log_content(this);
-        } else if (this->title_is("Performance Monitor")) {
-            WindowManager::draw_perf_monitor_content(this);
-        } else if (this->title_is("About This Mac")) {
-            WindowManager::draw_about_content(this);
-        } else if (this->title_is("Safari")) {
-            WindowManager::draw_safari_content(this);
-        } else if (this->title_is("Mail")) {
-            WindowManager::draw_mail_content(this);
-        } else if (this->title_is("App Store")) {
-            WindowManager::draw_appstore_content(this);
-        } else if (this->title_is("Notes")) {
-            WindowManager::draw_notes_content(this);
-        } else if (this->title_starts_with("Code Editor")) {
-            WindowManager::draw_code_editor_content(this);
-        } else if (this->title_is("System Settings")) {
-            WindowManager::draw_settings_content(this);
-        } else {
-            WindowManager::draw_window_client_area(this);
-        }
+        WindowManager::draw_window_client_area(this);
     }
 }
 
@@ -2427,7 +2439,16 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
             if (clicked) {
                 int wx = clicked->rect.x;
                 int wy = clicked->rect.y;
-                if (in_rect(new_x, new_y, wx + 13, wy + 9, 12, 12)) {
+                if (!clicked->is_maximized && in_rect(new_x, new_y, wx + clicked->rect.w - 16, wy + clicked->rect.h - 16, 16, 16)) {
+                    active_window = clicked;
+                    is_resizing_window = true;
+                    resize_start_w = clicked->rect.w;
+                    resize_start_h = clicked->rect.h;
+                    click_start_x = new_x;
+                    click_start_y = new_y;
+                    focus_window(clicked);
+                    force_redraw_all();
+                } else if (in_rect(new_x, new_y, wx + 13, wy + 9, 12, 12)) {
                     close_window(clicked->id);
                     force_redraw_all();
                 } else if (in_rect(new_x, new_y, wx + 33, wy + 9, 12, 12)) {
@@ -2914,7 +2935,6 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                 active_window->rect.x = next_x;
                 active_window->rect.y = next_y;
 
-                // Dual disjoint dirty rectangles: old position (restore bg) + new position (draw window)
                 Rect old_dirty = {old_rect.x - 32, old_rect.y - 32, old_rect.w + 64, old_rect.h + 64};
                 Rect new_dirty = {next_x - 32, next_y - 32, active_window->rect.w + 64, active_window->rect.h + 64};
 
@@ -2929,11 +2949,55 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                 if (new_dirty.x + new_dirty.w > width) new_dirty.w = width - new_dirty.x;
                 if (new_dirty.y + new_dirty.h > height) new_dirty.h = height - new_dirty.y;
 
-                redraw_dirty_rect(old_dirty);
-                redraw_dirty_rect(new_dirty);
+                // Atomic dual-region composite: render BOTH regions to backbuffer before ANY VRAM flush
+                Rect s_old = {scale_dim(old_dirty.x), scale_dim(old_dirty.y), scale_dim(old_dirty.w), scale_dim(old_dirty.h)};
+                Rect s_new = {scale_dim(new_dirty.x), scale_dim(new_dirty.y), scale_dim(new_dirty.w), scale_dim(new_dirty.h)};
+
+                // Pass 1: Render old region to backbuffer (restores background)
+                drivers::Framebuffer::set_clip_rect(s_old);
+                drivers::Framebuffer::draw_mac_wallpaper(s_old.x, s_old.y, s_old.w, s_old.h);
+                draw_desktop_icons();
+                draw_mac_decorations();
+                draw_all_windows();
+
+                // Pass 2: Render new region to backbuffer (draws window at new position)
+                drivers::Framebuffer::set_clip_rect(s_new);
+                drivers::Framebuffer::draw_mac_wallpaper(s_new.x, s_new.y, s_new.w, s_new.h);
+                draw_desktop_icons();
+                draw_mac_decorations();
+                draw_all_windows();
+
+                drivers::Framebuffer::clear_clip_rect();
+
+                // Atomic VRAM flush: both regions swap simultaneously (zero flickering)
+                drivers::Framebuffer::swap_dirty_rect_fast(s_old);
+                drivers::Framebuffer::swap_dirty_rect_fast(s_new);
+
+                cursor_cached = false;
+                update_cursor(mouse_x, mouse_y);
 
                 needs_redraw = false;
                 state_updated = true;
+            }
+        } else if (active_window && is_resizing_window) {
+            int next_w = resize_start_w + (new_x - click_start_x);
+            int next_h = resize_start_h + (new_y - click_start_y);
+            
+            if (next_w < 200) next_w = 200;
+            if (next_h < 150) next_h = 150;
+            
+            if (next_w != active_window->rect.w || next_h != active_window->rect.h) {
+                int old_w = active_window->rect.w;
+                int old_h = active_window->rect.h;
+                
+                active_window->rect.w = next_w;
+                active_window->rect.h = next_h;
+                
+                int max_w = old_w > next_w ? old_w : next_w;
+                int max_h = old_h > next_h ? old_h : next_h;
+                
+                dirty = {active_window->rect.x - 32, active_window->rect.y - 32, max_w + 64, max_h + 64};
+                needs_redraw = true;
             }
         } else if (dragged_desktop_item_idx != -1) {
             DiskItem& it = desktop_items[dragged_desktop_item_idx];
@@ -2994,6 +3058,12 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
     if (!state_updated && left_up) {
         if (active_window && active_window->is_dragging) {
             active_window->is_dragging = false;
+            force_redraw_all();
+            state_updated = true;
+            trigger_host_persist();
+        }
+        if (active_window && is_resizing_window) {
+            is_resizing_window = false;
             force_redraw_all();
             state_updated = true;
             trigger_host_persist();
