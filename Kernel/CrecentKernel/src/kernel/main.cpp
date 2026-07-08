@@ -13,6 +13,7 @@
 #include "../drivers/framebuffer.hpp"
 #include "wm.hpp"
 #include "../drivers/ps2.hpp"
+#include "../drivers/ttf.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -227,6 +228,9 @@ void gui_demo_thread(void* arg) {
 
     drivers::Serial::println("[DEMO] Starting Graphical User Interface and Window Manager...");
 
+    // Initialize TrueType Font Renderer
+    drivers::TtfRenderer::init();
+
     // 2. Initialize Window Manager
     wm::WindowManager::init();
 
@@ -260,7 +264,7 @@ void gui_demo_thread(void* arg) {
     if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
         cursor_x += m_dx;
         cursor_y -= m_dy; // Mouse dy is upward positive, screen y is downward positive
-        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left, m_right);
     }
     wm::WindowManager::draw_desktop();
 
@@ -269,7 +273,7 @@ void gui_demo_thread(void* arg) {
     if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
         cursor_x += m_dx;
         cursor_y -= m_dy;
-        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left, m_right);
     }
     wm::WindowManager::draw_desktop();
 
@@ -282,7 +286,7 @@ void gui_demo_thread(void* arg) {
         if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
             cursor_x += m_dx;
             cursor_y -= m_dy;
-            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left, m_right);
         }
         wm::WindowManager::draw_desktop();
 
@@ -297,7 +301,7 @@ void gui_demo_thread(void* arg) {
     if (drivers::Ps2::poll_mouse(m_dx, m_dy, m_left, m_right)) {
         cursor_x += m_dx;
         cursor_y -= m_dy;
-        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+        wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left, m_right);
     }
     wm::WindowManager::draw_desktop();
 
@@ -359,7 +363,7 @@ void gui_demo_thread(void* arg) {
 
             cursor_x += m_dx;
             cursor_y -= m_dy;
-            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left);
+            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, m_left, m_right);
         }
         
         // Poll keyboard characters

@@ -22,6 +22,13 @@ public:
     void draw();
 };
 
+struct ContextMenu {
+    bool active;
+    int x, y, w, h;
+    int type; // 0 = Apple, 1 = Finder/File, 2 = Desktop Right-Click
+    int hovered_item;
+};
+
 class WindowManager {
 private:
     static Window* window_list_head;
@@ -31,9 +38,12 @@ private:
     static int last_mouse_x;
     static int last_mouse_y;
     static bool mouse_pressed;
+    static bool right_mouse_pressed;
     static Window* active_window;
     static int drag_offset_x;
     static int drag_offset_y;
+    
+    static ContextMenu active_menu;
 
     static void focus_window(Window* win);
     static void draw_cursor();
@@ -46,7 +56,7 @@ public:
     static void draw_desktop();
     static void draw_mac_decorations();
     static void force_redraw_all();
-    static void handle_mouse_move(int new_x, int new_y, bool pressed);
+    static void handle_mouse_move(int new_x, int new_y, bool left_pressed, bool right_pressed);
     
     static int get_mouse_x() { return mouse_x; }
     static int get_mouse_y() { return mouse_y; }
