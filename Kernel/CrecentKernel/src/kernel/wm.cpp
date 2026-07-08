@@ -1250,36 +1250,50 @@ void Window::draw(bool is_active) {
     }
 
     uint8_t alpha = 255;
+    if (this->is_dragging) {
+        alpha = 200; // Hardware-free semi-transparency for smooth visual feedback
+    }
 
     WindowManager::draw_window_shadow(this->rect, active, alpha);
 
     bool is_terminal = this->title_is("Terminal");
     WindowManager::draw_window_body(this, alpha, is_terminal);
 
-    if (is_terminal) {
-        WindowManager::draw_terminal_content(this);
-    } else if (this->title_is("Finder")) {
-        WindowManager::draw_finder_content(this);
-    } else if (this->title_is("System Log")) {
-        WindowManager::draw_system_log_content(this);
-    } else if (this->title_is("Performance Monitor")) {
-        WindowManager::draw_perf_monitor_content(this);
-    } else if (this->title_is("About This Mac")) {
-        WindowManager::draw_about_content(this);
-    } else if (this->title_is("Safari")) {
-        WindowManager::draw_safari_content(this);
-    } else if (this->title_is("Mail")) {
-        WindowManager::draw_mail_content(this);
-    } else if (this->title_is("App Store")) {
-        WindowManager::draw_appstore_content(this);
-    } else if (this->title_is("Notes")) {
-        WindowManager::draw_notes_content(this);
-    } else if (this->title_starts_with("Code Editor")) {
-        WindowManager::draw_code_editor_content(this);
-    } else if (this->title_is("System Settings")) {
-        WindowManager::draw_settings_content(this);
+    // Fast-path: Skip heavy application rendering during active movement
+    // This stops vector fonts and HTML loops from starving the system tick timer
+    bool fast_mode = (this->is_dragging || (active && is_resizing_window));
+    
+    if (fast_mode) {
+        int cx = rect.x + rect.w / 2;
+        int cy = rect.y + rect.h / 2;
+        const char* msg = this->is_dragging ? "Moving..." : "Resizing...";
+        WindowManager::draw_string(msg, cx - 40, cy, C_TEXT, 15.0f);
     } else {
-        WindowManager::draw_window_client_area(this);
+        if (is_terminal) {
+            WindowManager::draw_terminal_content(this);
+        } else if (this->title_is("Finder")) {
+            WindowManager::draw_finder_content(this);
+        } else if (this->title_is("System Log")) {
+            WindowManager::draw_system_log_content(this);
+        } else if (this->title_is("Performance Monitor")) {
+            WindowManager::draw_perf_monitor_content(this);
+        } else if (this->title_is("About This Mac")) {
+            WindowManager::draw_about_content(this);
+        } else if (this->title_is("Safari")) {
+            WindowManager::draw_safari_content(this);
+        } else if (this->title_is("Mail")) {
+            WindowManager::draw_mail_content(this);
+        } else if (this->title_is("App Store")) {
+            WindowManager::draw_appstore_content(this);
+        } else if (this->title_is("Notes")) {
+            WindowManager::draw_notes_content(this);
+        } else if (this->title_starts_with("Code Editor")) {
+            WindowManager::draw_code_editor_content(this);
+        } else if (this->title_is("System Settings")) {
+            WindowManager::draw_settings_content(this);
+        } else {
+            WindowManager::draw_window_client_area(this);
+        }
     }
 }
 
@@ -2935,49 +2949,18 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                 active_window->rect.x = next_x;
                 active_window->rect.y = next_y;
 
-                Rect old_dirty = {old_rect.x - 32, old_rect.y - 32, old_rect.w + 64, old_rect.h + 64};
-                Rect new_dirty = {next_x - 32, next_y - 32, active_window->rect.w + 64, active_window->rect.h + 64};
+                // Unified Bounding Box Strategy (Fixes overlapping tearing)
+                int x_min = old_rect.x < next_x ? old_rect.x : next_x;
+                int y_min = old_rect.y < next_y ? old_rect.y : next_y;
+                int x_max = (old_rect.x + old_rect.w > next_x + active_window->rect.w) ? (old_rect.x + old_rect.w) : (next_x + active_window->rect.w);
+                int y_max = (old_rect.y + old_rect.h > next_y + active_window->rect.h) ? (old_rect.y + old_rect.h) : (next_y + active_window->rect.h);
 
-                // Clamp to screen bounds
-                if (old_dirty.x < 0) { old_dirty.w += old_dirty.x; old_dirty.x = 0; }
-                if (old_dirty.y < 0) { old_dirty.h += old_dirty.y; old_dirty.y = 0; }
-                if (old_dirty.x + old_dirty.w > width) old_dirty.w = width - old_dirty.x;
-                if (old_dirty.y + old_dirty.h > height) old_dirty.h = height - old_dirty.y;
+                // Encompass shadow bounds
+                x_min -= 32; y_min -= 32;
+                x_max += 32; y_max += 32;
 
-                if (new_dirty.x < 0) { new_dirty.w += new_dirty.x; new_dirty.x = 0; }
-                if (new_dirty.y < 0) { new_dirty.h += new_dirty.y; new_dirty.y = 0; }
-                if (new_dirty.x + new_dirty.w > width) new_dirty.w = width - new_dirty.x;
-                if (new_dirty.y + new_dirty.h > height) new_dirty.h = height - new_dirty.y;
-
-                // Atomic dual-region composite: render BOTH regions to backbuffer before ANY VRAM flush
-                Rect s_old = {scale_dim(old_dirty.x), scale_dim(old_dirty.y), scale_dim(old_dirty.w), scale_dim(old_dirty.h)};
-                Rect s_new = {scale_dim(new_dirty.x), scale_dim(new_dirty.y), scale_dim(new_dirty.w), scale_dim(new_dirty.h)};
-
-                // Pass 1: Render old region to backbuffer (restores background)
-                drivers::Framebuffer::set_clip_rect(s_old);
-                drivers::Framebuffer::draw_mac_wallpaper(s_old.x, s_old.y, s_old.w, s_old.h);
-                draw_desktop_icons();
-                draw_mac_decorations();
-                draw_all_windows();
-
-                // Pass 2: Render new region to backbuffer (draws window at new position)
-                drivers::Framebuffer::set_clip_rect(s_new);
-                drivers::Framebuffer::draw_mac_wallpaper(s_new.x, s_new.y, s_new.w, s_new.h);
-                draw_desktop_icons();
-                draw_mac_decorations();
-                draw_all_windows();
-
-                drivers::Framebuffer::clear_clip_rect();
-
-                // Atomic VRAM flush: both regions swap simultaneously (zero flickering)
-                drivers::Framebuffer::swap_dirty_rect_fast(s_old);
-                drivers::Framebuffer::swap_dirty_rect_fast(s_new);
-
-                cursor_cached = false;
-                update_cursor(mouse_x, mouse_y);
-
-                needs_redraw = false;
-                state_updated = true;
+                dirty = {x_min, y_min, x_max - x_min, y_max - y_min};
+                needs_redraw = true; // Let the standard pipeline safely render it once
             }
         } else if (active_window && is_resizing_window) {
             int next_w = resize_start_w + (new_x - click_start_x);
