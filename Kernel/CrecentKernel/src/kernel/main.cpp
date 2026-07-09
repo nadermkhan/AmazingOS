@@ -78,6 +78,32 @@ static inline uint64_t user_syscall3(uint64_t num, uint64_t a1, uint64_t a2, uin
     return ret;
 }
 
+static inline size_t user_strlen(const char* s) {
+    size_t len = 0;
+    while (s[len]) len++;
+    return len;
+}
+
+static inline int user_open(const char* path, int flags) {
+    return (int)user_syscall3(8, (uint64_t)path, (uint64_t)flags, 0);
+}
+
+static inline ssize_t user_read(int fd, void* buf, size_t count) {
+    return (ssize_t)user_syscall3(9, (uint64_t)fd, (uint64_t)buf, (uint64_t)count);
+}
+
+static inline int user_close(int fd) {
+    return (int)user_syscall3(10, (uint64_t)fd, 0, 0);
+}
+
+static inline int user_fork() {
+    return (int)user_syscall3(11, 0, 0, 0);
+}
+
+static inline int user_execve(const char* path, char* const argv[], char* const envp[]) {
+    return (int)user_syscall3(12, (uint64_t)path, (uint64_t)argv, (uint64_t)envp);
+}
+
 static inline void user_write(const char* msg, size_t len) {
     user_syscall3(1, 1, (uint64_t)msg, len);
 }
@@ -92,26 +118,75 @@ static inline void user_exit() {
 
 // User-space thread entry point
 void user_thread_entry() {
-    char msg1[33];
-    msg1[0] = 'H'; msg1[1] = 'e'; msg1[2] = 'l'; msg1[3] = 'l'; msg1[4] = 'o';
-    msg1[5] = ' '; msg1[6] = 'f'; msg1[7] = 'r'; msg1[8] = 'o'; msg1[9] = 'm';
-    msg1[10] = ' '; msg1[11] = 'U'; msg1[12] = 's'; msg1[13] = 'e'; msg1[14] = 'r';
-    msg1[15] = ' '; msg1[16] = 'S'; msg1[17] = 'p'; msg1[18] = 'a'; msg1[19] = 'c';
-    msg1[20] = 'e'; msg1[21] = ' '; msg1[22] = '('; msg1[23] = 'R'; msg1[24] = 'i';
-    msg1[25] = 'n'; msg1[26] = 'g'; msg1[27] = ' '; msg1[28] = '3'; msg1[29] = ')';
-    msg1[30] = '!'; msg1[31] = '\n'; msg1[32] = '\0';
-    user_write(msg1, 32);
+    // 1. Path "/tar/hello.txt" constructed on the stack (User mapped space)
+    char path[15];
+    path[0] = '/'; path[1] = 't'; path[2] = 'a'; path[3] = 'r'; path[4] = '/';
+    path[5] = 'h'; path[6] = 'e'; path[7] = 'l'; path[8] = 'l'; path[9] = 'o';
+    path[10] = '.'; path[11] = 't'; path[12] = 'x'; path[13] = 't'; path[14] = '\0';
 
-    user_yield();
+    int fd = user_open(path, 0);
+    if (fd < 0) {
+        char err_msg[13];
+        err_msg[0] = 'E'; err_msg[1] = 'r'; err_msg[2] = 'r'; err_msg[3] = 'o';
+        err_msg[4] = 'r'; err_msg[5] = ' '; err_msg[6] = 'O'; err_msg[7] = 'p';
+        err_msg[8] = 'e'; err_msg[9] = 'n'; err_msg[10] = '!'; err_msg[11] = '\n';
+        err_msg[12] = '\0';
+        user_write(err_msg, 12);
+        user_exit();
+    }
 
-    char msg2[28];
-    msg2[0] = 'U'; msg2[1] = 's'; msg2[2] = 'e'; msg2[3] = 'r'; msg2[4] = ' ';
-    msg2[5] = 's'; msg2[6] = 'p'; msg2[7] = 'a'; msg2[8] = 'c'; msg2[9] = 'e';
-    msg2[10] = ' '; msg2[11] = 't'; msg2[12] = 'h'; msg2[13] = 'r'; msg2[14] = 'e';
-    msg2[15] = 'a'; msg2[16] = 'd'; msg2[17] = ' '; msg2[18] = 'r'; msg2[19] = 'e';
-    msg2[20] = 's'; msg2[21] = 'u'; msg2[22] = 'm'; msg2[23] = 'e'; msg2[24] = 'd';
-    msg2[25] = '!'; msg2[26] = '\n'; msg2[27] = '\0';
-    user_write(msg2, 27);
+    // Read and print file contents
+    char buf[64];
+    ssize_t bytes;
+    while ((bytes = user_read(fd, buf, sizeof(buf) - 1)) > 0) {
+        buf[bytes] = '\0';
+        user_write(buf, bytes);
+    }
+    user_close(fd);
+
+    // 2. Perform fork test
+    int pid = user_fork();
+    if (pid < 0) {
+        char err_msg[13];
+        err_msg[0] = 'F'; err_msg[1] = 'o'; err_msg[2] = 'r'; err_msg[3] = 'k';
+        err_msg[4] = ' '; err_msg[5] = 'E'; err_msg[6] = 'r'; err_msg[7] = 'r';
+        err_msg[8] = 'o'; err_msg[9] = 'r'; err_msg[10] = '!'; err_msg[11] = '\n';
+        err_msg[12] = '\0';
+        user_write(err_msg, 12);
+    } else if (pid == 0) {
+        char child_msg[29];
+        child_msg[0] = 'I'; child_msg[1] = 'm'; child_msg[2] = ' '; child_msg[3] = 'c';
+        child_msg[4] = 'h'; child_msg[5] = 'i'; child_msg[6] = 'l'; child_msg[7] = 'd';
+        child_msg[8] = '!'; child_msg[9] = ' '; child_msg[10] = 'C'; child_msg[11] = 'a';
+        child_msg[12] = 'l'; child_msg[13] = 'l'; child_msg[14] = 'i'; child_msg[15] = 'n';
+        child_msg[16] = 'g'; child_msg[17] = ' '; child_msg[18] = 'e'; child_msg[19] = 'x';
+        child_msg[20] = 'e'; child_msg[21] = 'c'; child_msg[22] = 'v'; child_msg[23] = 'e';
+        child_msg[24] = '.'; child_msg[25] = '.'; child_msg[26] = '.'; child_msg[27] = '\n';
+        child_msg[28] = '\0';
+        user_write(child_msg, 28);
+
+        char exec_path[19];
+        exec_path[0] = '/'; exec_path[1] = 't'; exec_path[2] = 'a'; exec_path[3] = 'r';
+        exec_path[4] = '/'; exec_path[5] = 'b'; exec_path[6] = 'i'; exec_path[7] = 'n';
+        exec_path[8] = '/'; exec_path[9] = 't'; exec_path[10] = 'e'; exec_path[11] = 's';
+        exec_path[12] = 't'; exec_path[13] = '_'; exec_path[14] = 'a'; exec_path[15] = 'p';
+        exec_path[16] = 'p'; exec_path[17] = '\0';
+
+        user_execve(exec_path, nullptr, nullptr);
+
+        char fail_msg[20];
+        fail_msg[0] = 'E'; fail_msg[1] = 'x'; fail_msg[2] = 'e'; fail_msg[3] = 'c';
+        fail_msg[4] = 'v'; fail_msg[5] = 'e'; fail_msg[6] = ' '; fail_msg[7] = 'F';
+        fail_msg[8] = 'a'; fail_msg[9] = 'i'; fail_msg[10] = 'l'; fail_msg[11] = 'e';
+        fail_msg[12] = 'd'; fail_msg[13] = '!'; fail_msg[14] = '\n'; fail_msg[15] = '\0';
+        user_write(fail_msg, 15);
+    } else {
+        char parent_msg[12];
+        parent_msg[0] = 'I'; parent_msg[1] = 'm'; parent_msg[2] = ' '; parent_msg[3] = 'p';
+        parent_msg[4] = 'a'; parent_msg[5] = 'r'; parent_msg[6] = 'e'; parent_msg[7] = 'n';
+        parent_msg[8] = 't'; parent_msg[9] = '!'; parent_msg[10] = '\n'; parent_msg[11] = '\0';
+        user_write(parent_msg, 11);
+    }
 
     user_exit();
 }
@@ -270,7 +345,7 @@ void user_bootstrap_thread(void* arg) {
 
     char* src = (char*)entry_func;
     char* dest = (char*)code_phys;
-    for (size_t i = 0; i < 2048; ++i) {
+    for (size_t i = 0; i < 4096; ++i) {
         dest[i] = src[i];
     }
 
@@ -984,7 +1059,7 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
             fs::VFSNode* hello_node = fs::VFS::open("/tar/hello.txt");
             if (hello_node) {
                 char buf[128];
-                fs::File f = { hello_node, 0, 0 };
+                fs::File f = { hello_node, 0, 0, 1 };
                 ssize_t read_bytes = fs::VFS::read(&f, buf, sizeof(buf) - 1);
                 if (read_bytes > 0) {
                     buf[read_bytes] = '\0';
@@ -1004,7 +1079,7 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
             fs::VFSNode* info_node = fs::VFS::open("/tar/docs/info.txt");
             if (info_node) {
                 char buf[128];
-                fs::File f = { info_node, 0, 0 };
+                fs::File f = { info_node, 0, 0, 1 };
                 ssize_t read_bytes = fs::VFS::read(&f, buf, sizeof(buf) - 1);
                 if (read_bytes > 0) {
                     buf[read_bytes] = '\0';

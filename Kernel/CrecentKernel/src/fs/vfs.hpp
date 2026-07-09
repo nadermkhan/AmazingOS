@@ -25,11 +25,11 @@ struct VFSNode {
     VFSNode* (*finddir)(VFSNode* node, const char* name);
 };
 
-// File descriptor structure (holds session info like offset)
 struct File {
     VFSNode* node;
     size_t offset;
     uint32_t flags;
+    int ref_count;
 };
 
 struct MountPoint {

@@ -44,6 +44,8 @@ syscall_handler_entry:
     call syscall_dispatcher
 
     # 6. Restore general purpose registers
+.global syscall_restore_registers
+syscall_restore_registers:
     popq %r15
     popq %r14
     popq %r13
@@ -99,3 +101,7 @@ jump_to_user_mode:
 
     # Transition to Ring 3
     iretq
+
+.global fork_child_return
+fork_child_return:
+    jmp syscall_restore_registers

@@ -1,6 +1,7 @@
 #include "scheduler.hpp"
 #include "heap.hpp"
 #include "gdt.hpp"
+#include "vmm.hpp"
 #include "../drivers/serial.hpp"
 
 extern "C" {
@@ -76,6 +77,29 @@ void scheduler_init() {
     main_thread.stack_limit = nullptr;
     main_thread.rsp0 = (uint64_t)boot_stack_top;
     main_thread.next = nullptr;
+    main_thread.pml4_phys = active_pml4;
+
+    // Initialize file descriptor table for main thread
+    for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; ++i) {
+        main_thread.fd_pool[i].node = nullptr;
+        main_thread.fd_pool[i].offset = 0;
+        main_thread.fd_pool[i].flags = 0;
+        main_thread.fd_pool[i].ref_count = 0;
+        main_thread.fd_table[i] = nullptr;
+    }
+    // Set standard FDs
+    main_thread.fd_pool[0].node = (fs::VFSNode*)1;
+    main_thread.fd_pool[0].ref_count = 1;
+    main_thread.fd_table[0] = &main_thread.fd_pool[0];
+
+    main_thread.fd_pool[1].node = (fs::VFSNode*)2;
+    main_thread.fd_pool[1].ref_count = 1;
+    main_thread.fd_table[1] = &main_thread.fd_pool[1];
+
+    main_thread.fd_pool[2].node = (fs::VFSNode*)3;
+    main_thread.fd_pool[2].ref_count = 1;
+    main_thread.fd_table[2] = &main_thread.fd_pool[2];
+
     current_thread = &main_thread;
 
     // Load boot thread's kernel stack top into TSS for privilege transition exception safety
@@ -117,6 +141,28 @@ Thread* thread_create(void (*func)(void*), void* arg) {
     t->stack_limit = stack_page;
     t->rsp0 = (uint64_t)stack_page + 4096;
     t->next = nullptr;
+    t->pml4_phys = current_thread ? current_thread->pml4_phys : active_pml4;
+
+    // Initialize file descriptor table
+    for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; ++i) {
+        t->fd_pool[i].node = nullptr;
+        t->fd_pool[i].offset = 0;
+        t->fd_pool[i].flags = 0;
+        t->fd_pool[i].ref_count = 0;
+        t->fd_table[i] = nullptr;
+    }
+    // Set standard FDs
+    t->fd_pool[0].node = (fs::VFSNode*)1;
+    t->fd_pool[0].ref_count = 1;
+    t->fd_table[0] = &t->fd_pool[0];
+
+    t->fd_pool[1].node = (fs::VFSNode*)2;
+    t->fd_pool[1].ref_count = 1;
+    t->fd_table[1] = &t->fd_pool[1];
+
+    t->fd_pool[2].node = (fs::VFSNode*)3;
+    t->fd_pool[2].ref_count = 1;
+    t->fd_table[2] = &t->fd_pool[2];
 
     // 4. Add to run queue
     IntLock lock;
@@ -165,6 +211,24 @@ void schedule() {
     next->state = THREAD_RUNNING;
     current_thread = next;
 
+    // Switch address space if necessary (and flush TLB)
+    uint64_t current_cr3;
+    __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(current_cr3));
+    current_cr3 &= ~0xFFFULL;
+    if (next->pml4_phys != current_cr3) {
+        drivers::Serial::print("[SCHED] Switching CR3 PML4 base to: ");
+        char hex_buf[19];
+        hex_buf[0] = '0'; hex_buf[1] = 'x';
+        const char* hex_chars = "0123456789ABCDEF";
+        for (int x = 0; x < 16; ++x) {
+            hex_buf[2 + x] = hex_chars[(next->pml4_phys >> ((15 - x) * 4)) & 0x0F];
+        }
+        hex_buf[18] = '\0';
+        drivers::Serial::println(hex_buf);
+        active_pml4 = next->pml4_phys;
+        __asm__ __volatile__ ("mov %0, %%cr3" : : "r"(next->pml4_phys) : "memory");
+    }
+
     // Load next thread's kernel stack top into TSS for privilege transition exception safety
     gdt_update_tss_rsp0(next->rsp0);
 
@@ -184,6 +248,10 @@ void thread_exit() {
         stack_to_free = nullptr;
     }
     if (thread_to_free) {
+        // Reclaim custom user process PML4 page tables
+        if (thread_to_free->pml4_phys != main_thread.pml4_phys) {
+            // vmm_destroy_user_address_space(thread_to_free->pml4_phys);
+        }
         delete thread_to_free;
         thread_to_free = nullptr;
     }
@@ -207,6 +275,15 @@ void thread_exit() {
     stack_to_free = current->stack_limit;
     thread_to_free = current;
 
+    // Switch address space if necessary (and flush TLB)
+    uint64_t current_cr3;
+    __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(current_cr3));
+    current_cr3 &= ~0xFFFULL;
+    if (next->pml4_phys != current_cr3) {
+        active_pml4 = next->pml4_phys;
+        __asm__ __volatile__ ("mov %0, %%cr3" : : "r"(next->pml4_phys) : "memory");
+    }
+
     // Load next thread's kernel stack top into TSS
     gdt_update_tss_rsp0(next->rsp0);
 
@@ -220,6 +297,17 @@ void thread_exit() {
 
 Thread* scheduler_get_current() {
     return current_thread;
+}
+
+void scheduler_enqueue(Thread* t) {
+    IntLock lock;
+    lock.lock();
+    enqueue(t);
+    lock.unlock();
+}
+
+uint64_t scheduler_generate_id() {
+    return next_thread_id++;
 }
 
 } // namespace kernel

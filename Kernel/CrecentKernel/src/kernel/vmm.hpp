@@ -4,6 +4,8 @@
 
 namespace kernel {
 
+extern uint64_t active_pml4;
+
 // Page Table Flags (x86_64 structure)
 constexpr uint64_t VMM_FLAG_PRESENT    = 1ULL << 0;
 constexpr uint64_t VMM_FLAG_WRITABLE   = 1ULL << 1;
@@ -38,5 +40,17 @@ bool vmm_is_user_mapped(uint64_t virt);
 // Translate a virtual address to its corresponding physical address
 // Returns 0 if the address is not mapped
 uint64_t vmm_get_phys(uint64_t virt);
+
+// Create a new user PML4 address space (copies kernel mappings, user space clean)
+uint64_t vmm_create_user_address_space();
+
+// Recursively destroy all user pages and page directories mapped in a PML4
+void vmm_destroy_user_address_space(uint64_t pml4_phys);
+
+// Map a virtual page into a specific PML4 directory
+bool vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags);
+
+// Clone user space address mappings from parent to child PML4
+void vmm_clone_user_space(uint64_t parent_pml4, uint64_t child_pml4);
 
 } // namespace kernel

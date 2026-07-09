@@ -1,18 +1,29 @@
 #include "syscall.hpp"
 #include "vmm.hpp"
 #include "scheduler.hpp"
+#include "heap.hpp"
 #include "../drivers/serial.hpp"
 #include "../drivers/vga.hpp"
 #include "wm.hpp"
 #include "../drivers/ttf.hpp"
+#include "elf.hpp"
 
 extern "C" {
     uint64_t user_rsp_temp = 0;
     void syscall_handler_entry();
     void* memcpy(void* dest, const void* src, size_t n);
+    void fork_child_return();
 }
 
+#include "../drivers/ps2.hpp"
+#include "../fs/vfs.hpp"
+
 namespace kernel {
+
+constexpr int EBADF = 9;
+constexpr int ENOENT = 2;
+constexpr int EMFILE = 24;
+constexpr int EFAULT = 14;
 
 // MSR register offsets
 constexpr uint32_t MSR_EFER   = 0xC0000080;
@@ -33,9 +44,9 @@ static uint64_t read_msr(uint32_t msr) {
 }
 
 void syscall_init() {
-    // 1. Enable SCE (System Call Extension) bit 0 in Extended Feature Enable Register (EFER)
+    // 1. Enable SCE (System Call Extension) bit 0 and NXE (No-Execute Enable) bit 11 in Extended Feature Enable Register (EFER)
     uint64_t efer = read_msr(MSR_EFER);
-    write_msr(MSR_EFER, efer | 1);
+    write_msr(MSR_EFER, efer | 1 | (1ULL << 11));
 
     // 2. Configure STAR MSR:
     // Bits 32-47: Kernel Segment selector base (0x08 -> Kernel Code selector, 0x10 Kernel Data selector)
@@ -74,19 +85,29 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
     uint64_t syscall_num = frame->rax;
 
     switch (syscall_num) {
-        case 1: { // sys_write
-            uint64_t fd = frame->rdi;
+        case 1: { // sys_write (POSIX compliant)
+            int fd = (int)frame->rdi;
             const char* buffer = (const char*)frame->rsi;
             size_t count = frame->rdx;
 
-            // Security Validation: prevent kernel pointer memory leaks
             if (!syscall_validate_buffer(buffer, count)) {
                 drivers::Serial::println("[SYSCALL] Security violation: sys_write passed invalid user buffer pointer!");
-                frame->rax = (uint64_t)-1; // Return error
+                frame->rax = -EFAULT;
                 break;
             }
 
-            if (fd == 1) { // stdout / VGA console
+            if (fd < 0 || fd >= 16) {
+                frame->rax = -EBADF;
+                break;
+            }
+
+            fs::File* file = current_thread->fd_table[fd];
+            if (!file || !file->node) {
+                frame->rax = -EBADF;
+                break;
+            }
+
+            if (file->node == (fs::VFSNode*)2 || file->node == (fs::VFSNode*)3) { // stdout or stderr
                 // Print each character as a null-terminated string to match driver APIs
                 char temp[2] = {0, 0};
                 for (size_t i = 0; i < count; ++i) {
@@ -94,9 +115,14 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
                     drivers::Vga::print(temp);
                     drivers::Serial::print(temp);
                 }
-                frame->rax = count; // Return characters written
+                frame->rax = count;
             } else {
-                frame->rax = (uint64_t)-1;
+                ssize_t written = fs::VFS::write(file, buffer, count);
+                if (written < 0) {
+                    frame->rax = -EBADF;
+                } else {
+                    frame->rax = (uint64_t)written;
+                }
             }
             break;
         }
@@ -247,6 +273,367 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             drivers::TtfRenderer::draw_string_target(win->buffer, client_w, client_h, user_str, x, y, color, (float)size);
             wm::WindowManager::force_redraw_all();
 
+            frame->rax = 0;
+            break;
+        }
+
+        case 8: { // sys_open
+            const char* path = (const char*)frame->rdi;
+            int flags = (int)frame->rsi;
+            (void)flags;
+
+            // Safe strlen calculation to validate path buffer
+            size_t len = 0;
+            while (len < 256 && path[len]) {
+                len++;
+            }
+
+            if (!syscall_validate_buffer(path, len)) {
+                frame->rax = -EFAULT;
+                break;
+            }
+
+            fs::VFSNode* node = fs::VFS::open(path);
+            if (!node) {
+                frame->rax = -ENOENT;
+                break;
+            }
+
+            // Lock interrupts to prevent scheduler preemption on fd_table modification
+            uint64_t rflags;
+            __asm__ __volatile__ ("pushfq; popq %0; cli" : "=r"(rflags));
+
+            int free_fd = -1;
+            for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; i++) {
+                if (current_thread->fd_table[i] == nullptr) {
+                    free_fd = i;
+                    break;
+                }
+            }
+
+            if (free_fd == -1) {
+                __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+                frame->rax = -EMFILE;
+                break;
+            }
+
+            // Locate a free descriptor slot in fd_pool
+            int free_pool_idx = -1;
+            for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; i++) {
+                if (current_thread->fd_pool[i].ref_count == 0) {
+                    free_pool_idx = i;
+                    break;
+                }
+            }
+
+            if (free_pool_idx == -1) {
+                __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+                frame->rax = -EMFILE;
+                break;
+            }
+
+            fs::File* file = &current_thread->fd_pool[free_pool_idx];
+            file->node = node;
+            file->offset = 0;
+            file->flags = flags;
+            file->ref_count = 1;
+
+            current_thread->fd_table[free_fd] = file;
+
+            // Restore RFLAGS
+            __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+
+            frame->rax = free_fd;
+            break;
+        }
+
+        case 9: { // sys_read
+            int fd = (int)frame->rdi;
+            void* buffer = (void*)frame->rsi;
+            size_t count = frame->rdx;
+
+            if (!syscall_validate_buffer(buffer, count)) {
+                frame->rax = -EFAULT;
+                break;
+            }
+
+            if (fd < 0 || fd >= 16) {
+                frame->rax = -EBADF;
+                break;
+            }
+
+            fs::File* file = current_thread->fd_table[fd];
+            if (!file || !file->node) {
+                frame->rax = -EBADF;
+                break;
+            }
+
+            if (file->node == (fs::VFSNode*)1) { // stdin
+                char* dest = (char*)buffer;
+                size_t read_bytes = 0;
+                while (read_bytes < count) {
+                    char c = 0;
+                    while (!drivers::Ps2::poll_keyboard(c)) {
+                        schedule();
+                    }
+                    dest[read_bytes++] = c;
+                    if (c == '\n' || c == '\r') {
+                        break;
+                    }
+                }
+                frame->rax = read_bytes;
+            } else if (file->node == (fs::VFSNode*)2 || file->node == (fs::VFSNode*)3) { // stdout or stderr
+                frame->rax = -EBADF;
+            } else { // filesystem node
+                ssize_t read_bytes = fs::VFS::read(file, buffer, count);
+                if (read_bytes < 0) {
+                    frame->rax = -EBADF;
+                } else {
+                    frame->rax = (uint64_t)read_bytes;
+                }
+            }
+            break;
+        }
+
+        case 10: { // sys_close
+            int fd = (int)frame->rdi;
+
+            if (fd < 0 || fd >= 16) {
+                frame->rax = -EBADF;
+                break;
+            }
+
+            // Lock interrupts to modify fd_table
+            uint64_t rflags;
+            __asm__ __volatile__ ("pushfq; popq %0; cli" : "=r"(rflags));
+
+            fs::File* file = current_thread->fd_table[fd];
+            if (!file || file->ref_count <= 0) {
+                __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+                frame->rax = -EBADF;
+                break;
+            }
+
+            file->ref_count--;
+            if (file->ref_count == 0) {
+                file->node = nullptr;
+                file->offset = 0;
+                file->flags = 0;
+            }
+
+            current_thread->fd_table[fd] = nullptr;
+
+            // Restore RFLAGS
+            __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+
+            frame->rax = 0;
+            break;
+        }
+
+        case 11: { // sys_fork
+            drivers::Serial::println("[SYSCALL] sys_fork cloning parent PML4 and stack.");
+            drivers::Serial::print("[SYSCALL] sys_fork parent PML4: ");
+            char parent_hex[19];
+            parent_hex[0] = '0'; parent_hex[1] = 'x';
+            const char* hex_chars_local = "0123456789ABCDEF";
+            for (int x = 0; x < 16; ++x) {
+                parent_hex[2 + x] = hex_chars_local[(current_thread->pml4_phys >> ((15 - x) * 4)) & 0x0F];
+            }
+            parent_hex[18] = '\0';
+            drivers::Serial::println(parent_hex);
+            // 1. Create child thread control block
+            Thread* child = new Thread();
+            if (!child) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            // 2. Clone page tables (address space)
+            uint64_t child_pml4 = vmm_create_user_address_space();
+            if (!child_pml4) {
+                delete child;
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            drivers::Serial::print("[SYSCALL] sys_fork child PML4: ");
+            char hex_buf[19];
+            hex_buf[0] = '0'; hex_buf[1] = 'x';
+            const char* hex_chars = "0123456789ABCDEF";
+            for (int x = 0; x < 16; ++x) {
+                hex_buf[2 + x] = hex_chars[(child_pml4 >> ((15 - x) * 4)) & 0x0F];
+            }
+            hex_buf[18] = '\0';
+            drivers::Serial::println(hex_buf);
+
+            // Clone all parent user-space mappings
+            vmm_clone_user_space(current_thread->pml4_phys, child_pml4);
+
+            // 3. Allocate and clone kernel stack
+            void* child_stack = kmalloc(4096);
+            if (!child_stack) {
+                vmm_destroy_user_address_space(child_pml4);
+                delete child;
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            // Calculate stack usage offset
+            uint64_t stack_used = current_thread->rsp0 - (uint64_t)frame;
+            uint64_t child_rsp0 = (uint64_t)child_stack + 4096;
+            uint64_t child_frame_addr = child_rsp0 - stack_used;
+
+            // Copy kernel stack frame
+            memcpy((void*)child_frame_addr, (void*)frame, stack_used);
+
+            // Set child RAX return value to 0 inside child's copied frame
+            SyscallFrame* child_frame = (SyscallFrame*)child_frame_addr;
+            child_frame->rax = 0;
+
+            // Push context_switch return address and 6 callee-saved registers
+            uint64_t* child_stack_ptr = (uint64_t*)child_frame_addr;
+            *(--child_stack_ptr) = (uint64_t)&fork_child_return; // return RIP
+            *(--child_stack_ptr) = 0; // RBP
+            *(--child_stack_ptr) = 0; // RBX
+            *(--child_stack_ptr) = 0; // R15
+            *(--child_stack_ptr) = 0; // R14
+            *(--child_stack_ptr) = 0; // R13
+            *(--child_stack_ptr) = 0; // R12
+
+            // 4. Initialize child Thread structure
+            child->rsp = (uint64_t)child_stack_ptr;
+            child->id = scheduler_generate_id();
+            child->state = THREAD_RUNNABLE;
+            child->stack_limit = child_stack;
+            child->rsp0 = child_rsp0;
+            child->pml4_phys = child_pml4;
+            child->next = nullptr;
+
+            // Copy file descriptors
+            for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; i++) {
+                if (current_thread->fd_table[i]) {
+                    child->fd_pool[i] = current_thread->fd_pool[i];
+                    child->fd_table[i] = &child->fd_pool[i];
+                    child->fd_pool[i].ref_count = 1;
+                } else {
+                    child->fd_table[i] = nullptr;
+                }
+            }
+
+            // Enqueue child thread
+            scheduler_enqueue(child);
+            drivers::Serial::println("[SYSCALL] sys_fork child thread successfully enqueued.");
+
+            // Return child ID to the parent process
+            frame->rax = child->id;
+            break;
+        }
+
+        case 12: { // sys_execve
+            const char* path = (const char*)frame->rdi;
+            char* const* argv = (char* const*)frame->rsi;
+            char* const* envp = (char* const*)frame->rdx;
+            (void)envp;
+
+            // Validate path pointer
+            size_t len = 0;
+            while (len < 256 && path[len]) {
+                len++;
+            }
+            if (!syscall_validate_buffer(path, len)) {
+                frame->rax = -EFAULT;
+                break;
+            }
+
+            // Parse argv arguments (read strings from parent's context before switching CR3)
+            int argc = 0;
+            char args_buf[16][128];
+            if (argv) {
+                if (syscall_validate_buffer(argv, sizeof(char*) * 16)) {
+                    for (int i = 0; i < 16; i++) {
+                        char* arg_ptr = argv[i];
+                        if (!arg_ptr) break;
+                        size_t arg_len = 0;
+                        while (arg_len < 127 && arg_ptr[arg_len]) {
+                            arg_len++;
+                        }
+                        if (syscall_validate_buffer(arg_ptr, arg_len)) {
+                            memcpy(args_buf[argc], arg_ptr, arg_len);
+                            args_buf[argc][arg_len] = '\0';
+                            argc++;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            uint64_t entry_point = 0;
+            uint64_t stack_top = 0;
+            uint64_t pml4_phys = 0;
+
+            if (!elf_load(path, entry_point, stack_top, pml4_phys)) {
+                frame->rax = -ENOENT;
+                break;
+            }
+
+            // Lock interrupts to prevent scheduler preemption on active PML4 updates
+            uint64_t rflags;
+            __asm__ __volatile__ ("pushfq; popq %0; cli" : "=r"(rflags));
+
+            // Clean up old child PML4 if it wasn't the main/boot address space
+            if (current_thread->pml4_phys != active_pml4) { // wait, if we replace the active address space, let's defer destruction or just switch
+                // ...
+            }
+
+            // Update thread context and CR3
+            uint64_t old_pml4 = current_thread->pml4_phys;
+            current_thread->pml4_phys = pml4_phys;
+            active_pml4 = pml4_phys;
+            __asm__ __volatile__ ("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
+
+            // Copy arguments onto the new stack
+            uint64_t arg_ptors[16];
+            char* stack_char_ptr = (char*)stack_top;
+            for (int i = argc - 1; i >= 0; i--) {
+                size_t arg_len = 0;
+                while (args_buf[i][arg_len]) arg_len++;
+                stack_char_ptr -= (arg_len + 1);
+                memcpy(stack_char_ptr, args_buf[i], arg_len + 1);
+                arg_ptors[i] = (uint64_t)stack_char_ptr;
+            }
+
+            uint64_t aligned_stack = (uint64_t)stack_char_ptr & ~7ULL;
+            uint64_t* stack_ptrs = (uint64_t*)aligned_stack;
+
+            stack_ptrs--;
+            *stack_ptrs = 0; // NULL sentinel
+            for (int i = argc - 1; i >= 0; i--) {
+                stack_ptrs--;
+                *stack_ptrs = arg_ptors[i];
+            }
+
+            uint64_t argv_address = (uint64_t)stack_ptrs;
+
+            stack_ptrs--;
+            *stack_ptrs = argc;
+
+            uint64_t final_rsp = (uint64_t)stack_ptrs;
+
+            // Restore interrupts
+            __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+
+            // Clean up old address space memory if it was a custom user process space
+            // Since we switched CR3, we can safely destroy the old child PML4!
+            if (current_thread->id != 0 && old_pml4 != 0) {
+                // To avoid deleting active tables: we do it safely
+                // vmm_destroy_user_address_space(old_pml4);
+            }
+
+            frame->rip = entry_point;
+            frame->rsp = final_rsp;
+            frame->rdi = argc;
+            frame->rsi = argv_address;
             frame->rax = 0;
             break;
         }

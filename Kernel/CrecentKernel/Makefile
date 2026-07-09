@@ -17,7 +17,7 @@ TARGET_PE = kernel.exe
 TARGET_ELF = kernel.bin
 
 # Object files mapping
-OBJS = boot.o main.o vga.o serial.o vfs.o gdt.o idt.o apic.o interrupts.o pmm.o vmm.o heap.o switch.o scheduler.o tarfs.o syscall.o syscall_asm.o framebuffer.o wm.o ps2.o libstub.o ttf.o
+OBJS = boot.o main.o vga.o serial.o vfs.o gdt.o idt.o apic.o interrupts.o pmm.o vmm.o heap.o switch.o scheduler.o tarfs.o syscall.o syscall_asm.o framebuffer.o wm.o ps2.o libstub.o ttf.o elf.o
 
 .PHONY: all clean qemu
 
@@ -97,6 +97,9 @@ libstub.o: src/kernel/libstub.cpp
 
 ttf.o: src/drivers/ttf.cpp
 	$(CXX) $(CXXFLAGS) -c src/drivers/ttf.cpp -o ttf.o
+
+elf.o: src/kernel/elf.cpp
+	$(CXX) $(CXXFLAGS) -c src/kernel/elf.cpp -o elf.o
 
 # Clean up build artifacts
 clean:
