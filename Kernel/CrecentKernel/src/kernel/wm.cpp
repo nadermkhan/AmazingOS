@@ -377,9 +377,9 @@ bool WindowManager::in_rect(int px, int py, const Rect& r) {
 // Drawing helpers
 // ---------------------------------------------------------------------------
 void WindowManager::draw_window_shadow(const Rect& r, bool active, uint8_t alpha) {
-    // Skip shadow on the actively dragged window for speed
-    bool drag_in_progress = (active_window && active_window->is_dragging);
-    if (active && drag_in_progress) return;
+    // Skip shadow on any window if a drag or resize is in progress to maximize CPU frame rate
+    bool drag_in_progress = (active_window && (active_window->is_dragging || is_resizing_window));
+    if (drag_in_progress) return;
 
     int shadow_size = active ? 24 : 12;
     int step = active ? 4 : 2;
@@ -1215,6 +1215,21 @@ void Window::draw(bool is_active) {
     (void)is_active;
     if (is_minimized) return;
 
+    // Occlusion Culling Check:
+    // If this window is completely covered by an opaque, non-minimized window in front of it, skip drawing.
+    bool is_occluded = false;
+    for (Window* front = this->next; front; front = front->next) {
+        if (!front->is_minimized && !front->is_dragging) {
+            if (this->rect.x >= front->rect.x && this->rect.y >= front->rect.y &&
+                this->rect.x + this->rect.w <= front->rect.x + front->rect.w &&
+                this->rect.y + this->rect.h <= front->rect.y + front->rect.h) {
+                is_occluded = true;
+                break;
+            }
+        }
+    }
+    if (is_occluded) return;
+
     bool active = (this == WindowManager::active_window);
     int shadow_size = active ? 24 : 12;
     Rect shadow_rect = {
@@ -1242,30 +1257,34 @@ void Window::draw(bool is_active) {
         const char* msg = this->is_dragging ? "Moving..." : "Resizing...";
         WindowManager::draw_string(msg, cx - 40, cy, C_TEXT, 15.0f);
     } else {
-        if (is_terminal) {
-            WindowManager::draw_terminal_content(this);
-        } else if (this->title_is("Finder")) {
-            WindowManager::draw_finder_content(this);
-        } else if (this->title_is("System Log")) {
-            WindowManager::draw_system_log_content(this);
-        } else if (this->title_is("Performance Monitor")) {
-            WindowManager::draw_perf_monitor_content(this);
-        } else if (this->title_is("About This Mac")) {
-            WindowManager::draw_about_content(this);
-        } else if (this->title_is("Safari")) {
-            WindowManager::draw_safari_content(this);
-        } else if (this->title_is("Mail")) {
-            WindowManager::draw_mail_content(this);
-        } else if (this->title_is("App Store")) {
-            WindowManager::draw_appstore_content(this);
-        } else if (this->title_is("Notes")) {
-            WindowManager::draw_notes_content(this);
-        } else if (this->title_starts_with("Code Editor")) {
-            WindowManager::draw_code_editor_content(this);
-        } else if (this->title_is("System Settings")) {
-            WindowManager::draw_settings_content(this);
-        } else {
-            WindowManager::draw_window_client_area(this);
+        // Only draw client area content if it intersects the active clip rect
+        Rect client_rect = {rect.x + 1, rect.y + TITLE_BAR_HEIGHT, rect.w - 2, rect.h - TITLE_BAR_HEIGHT - 12};
+        if (drivers::Framebuffer::get_clip_rect().intersects(client_rect)) {
+            if (is_terminal) {
+                WindowManager::draw_terminal_content(this);
+            } else if (this->title_is("Finder")) {
+                WindowManager::draw_finder_content(this);
+            } else if (this->title_is("System Log")) {
+                WindowManager::draw_system_log_content(this);
+            } else if (this->title_is("Performance Monitor")) {
+                WindowManager::draw_perf_monitor_content(this);
+            } else if (this->title_is("About This Mac")) {
+                WindowManager::draw_about_content(this);
+            } else if (this->title_is("Safari")) {
+                WindowManager::draw_safari_content(this);
+            } else if (this->title_is("Mail")) {
+                WindowManager::draw_mail_content(this);
+            } else if (this->title_is("App Store")) {
+                WindowManager::draw_appstore_content(this);
+            } else if (this->title_is("Notes")) {
+                WindowManager::draw_notes_content(this);
+            } else if (this->title_starts_with("Code Editor")) {
+                WindowManager::draw_code_editor_content(this);
+            } else if (this->title_is("System Settings")) {
+                WindowManager::draw_settings_content(this);
+            } else {
+                WindowManager::draw_window_client_area(this);
+            }
         }
     }
 }
@@ -1574,9 +1593,16 @@ void WindowManager::draw_wallpaper() {
 }
 
 void WindowManager::draw_desktop_icons() {
+    Rect clip = drivers::Framebuffer::get_clip_rect();
     for (int i = 0; i < desktop_item_count; i++) {
         DiskItem& it = desktop_items[i];
         if (str_equal(it.path, "Desktop")) {
+            // Check if icon bounds (padded for wide labels) overlap active dirty region
+            Rect icon_rect = {it.x - 32, it.y - 10, 128, 90};
+            if (!clip.intersects(icon_rect)) {
+                continue;
+            }
+
             if (it.selected) {
                 drivers::Framebuffer::draw_rounded_rect_alpha(it.x, it.y - 5, 64, 80, 8, 0x0080B0F0, 100);
             }
@@ -1834,9 +1860,30 @@ void WindowManager::draw_menu() {
 }
 
 void WindowManager::draw_mac_decorations() {
-    draw_menu_bar();
-    draw_dock();
-    draw_menu();
+    Rect clip = drivers::Framebuffer::get_clip_rect();
+    int screen_w = (int)drivers::Framebuffer::get_width();
+    int screen_h = (int)drivers::Framebuffer::get_height();
+
+    // Menu bar is at the top
+    Rect menu_bar_rect = {0, 0, screen_w, MENU_BAR_HEIGHT};
+    if (clip.intersects(menu_bar_rect)) {
+        draw_menu_bar();
+    }
+
+    // Dock is at the bottom (allow padding for vertical magnification shift)
+    int dock_y = screen_h - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+    int dock_x = (screen_w - DOCK_WIDTH) / 2;
+    Rect dock_rect = {dock_x, dock_y - 24, DOCK_WIDTH, DOCK_HEIGHT + 24};
+    if (clip.intersects(dock_rect)) {
+        draw_dock();
+    }
+
+    if (active_menu.active) {
+        Rect menu_rect = {active_menu.x, active_menu.y, active_menu.w, active_menu.h};
+        if (clip.intersects(menu_rect)) {
+            draw_menu();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

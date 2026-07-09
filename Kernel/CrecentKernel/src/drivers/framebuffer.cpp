@@ -20,7 +20,6 @@ static uint32_t pci_read_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t
 }
 
 uint64_t Framebuffer::detect_bga() {
-    // Scan standard PCI buses/slots for Bochs/QEMU VGA Card (Vendor 0x1234, Device 0x1111)
     for (uint32_t bus = 0; bus < 8; ++bus) {
         for (uint32_t slot = 0; slot < 32; ++slot) {
             uint32_t id = pci_read_config(bus, slot, 0, 0);
@@ -28,18 +27,15 @@ uint64_t Framebuffer::detect_bga() {
             uint16_t device = (uint16_t)(id >> 16);
             if (vendor == 0x1234 && device == 0x1111) {
                 uint32_t bar0 = pci_read_config(bus, slot, 0, 0x10);
-                
-                // Fix 5: Check if BAR0 indicates a 64-bit memory mapping
                 if ((bar0 & 0x6) == 0x4) { 
                     uint32_t bar1 = pci_read_config(bus, slot, 0, 0x14);
                     uint64_t base = ((uint64_t)bar1 << 32) | (bar0 & 0xFFFFFFF0ULL);
                     return base;
                 }
-                return bar0 & 0xFFFFFFF0ULL; // 32-bit Memory Mapping
+                return bar0 & 0xFFFFFFF0ULL;
             }
         }
     }
-    // Fallback default for QEMU VGA LFB if PCI config scan yields no device
     return 0xFD000000ULL;
 }
 
@@ -49,20 +45,16 @@ static void bga_write(uint16_t index, uint16_t data) {
 }
 
 void Framebuffer::setup_bga(uint32_t w, uint32_t h, uint32_t b) {
-    bga_write(4, 0); // VBE_DISPI_INDEX_ENABLE = 4, disable BGA temporarily
-    bga_write(1, w); // VBE_DISPI_INDEX_XRES = 1
-    bga_write(2, h); // VBE_DISPI_INDEX_YRES = 2
-    bga_write(3, b); // VBE_DISPI_INDEX_BPP = 3
-    
-    // Fix 4: Set Virtual Resolution and Offsets explicitly for strict VBE compliance
-    bga_write(5, w); // VBE_DISPI_INDEX_VIRT_WIDTH = 5
-    bga_write(6, h); // VBE_DISPI_INDEX_VIRT_HEIGHT = 6
-    bga_write(7, 0); // VBE_DISPI_INDEX_X_OFFSET = 7
-    bga_write(8, 0); // VBE_DISPI_INDEX_Y_OFFSET = 8
-    
-    bga_write(4, 0x01 | 0x40); // VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED
+    bga_write(4, 0);
+    bga_write(1, w);
+    bga_write(2, h);
+    bga_write(3, b);
+    bga_write(5, w);
+    bga_write(6, h);
+    bga_write(7, 0);
+    bga_write(8, 0);
+    bga_write(4, 0x01 | 0x40);
 }
-
 
 uint64_t Framebuffer::physical_base = 0;
 uint32_t* Framebuffer::virtual_base = nullptr;
@@ -83,10 +75,8 @@ bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, u
     pitch = p;
     bpp = b;
 
-    // Fix 6: Cast to 64-bit before multiplication to prevent 32-bit overflow on large resolutions
     uint64_t size = (uint64_t)height * pitch;
     
-    // 1. Map physical framebuffer memory range to the virtual window at 56GB (0xE00000000)
     virtual_base = (uint32_t*)0xE00000000ULL;
 
     for (uint64_t offset = 0; offset < size; offset += 4096) {
@@ -94,11 +84,8 @@ bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, u
                              kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_WRITE_THR);
     }
 
-    // 2. Allocate the back buffer in the kernel slab heap
     back_buffer = (uint32_t*)kernel::kmalloc(size);
-    if (!back_buffer) {
-        return false;
-    }
+    if (!back_buffer) return false;
 
     wallpaper_cache = (uint32_t*)kernel::kmalloc(size);
     if (!wallpaper_cache) {
@@ -107,13 +94,10 @@ bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, u
         return false;
     }
 
-    // 3. Clear initial frame to black
     initialized = true;
     clip_rect = {0, 0, (int)width, (int)height};
     
-    // Generate initial wallpaper cache
     update_wallpaper_cache();
-
     clear(0x00000000);
     swap_buffers();
 
@@ -126,13 +110,11 @@ void Framebuffer::set_clip_rect(Rect r) {
     int x2 = r.x + r.w;
     int y2 = r.y + r.h;
 
-    // Enforce hard hardware boundaries
     if (x1 < 0) x1 = 0;
     if (y1 < 0) y1 = 0;
     if (x2 > (int)width) x2 = (int)width;
     if (y2 > (int)height) y2 = (int)height;
     
-    // Prevent inversion anomalies
     if (x2 < x1) x2 = x1;
     if (y2 < y1) y2 = y1;
 
@@ -145,8 +127,8 @@ void Framebuffer::clear_clip_rect() {
 
 void Framebuffer::clear(uint32_t color) {
     if (!initialized) return;
-    uint32_t size_words = (height * pitch) / 4;
-    for (uint32_t i = 0; i < size_words; ++i) {
+    uint64_t size_words = ((uint64_t)height * pitch) / 4;
+    for (uint64_t i = 0; i < size_words; ++i) {
         back_buffer[i] = color;
     }
 }
@@ -157,7 +139,6 @@ void Framebuffer::draw_pixel(uint32_t x, uint32_t y, uint32_t color) {
     back_buffer[y * (pitch / 4) + x] = color;
 }
 
-// Fix 7: Added clip_rect bounds checking to get_pixel
 uint32_t Framebuffer::get_pixel(uint32_t x, uint32_t y) {
     if (!initialized || 
         x < (uint32_t)clip_rect.x || x >= (uint32_t)(clip_rect.x + clip_rect.w) ||
@@ -207,6 +188,10 @@ void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h
     if (start_x >= end_x || start_y >= end_y) return;
 
     uint32_t pitch_words = pitch / 4;
+    const uint32_t src_rb = (color & 0xFF00FF) * alpha;
+    const uint32_t src_g  = (color & 0x00FF00) * alpha;
+    const uint32_t inv    = 255 - alpha;
+
     for (int cy = start_y; cy < end_y; ++cy) {
         uint32_t line_offset = cy * pitch_words;
         if (alpha == 255) {
@@ -216,8 +201,8 @@ void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h
         } else {
             for (int cx = start_x; cx < end_x; ++cx) {
                 uint32_t bg = back_buffer[line_offset + cx];
-                uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
-                uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
+                uint32_t rb = (src_rb + (bg & 0xFF00FF) * inv) >> 8;
+                uint32_t g  = (src_g  + (bg & 0x00FF00) * inv) >> 8;
                 back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
             }
         }
@@ -227,31 +212,53 @@ void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h
 void Framebuffer::draw_rounded_rect_alpha(int x, int y, int w, int h, int r, uint32_t color, uint8_t alpha) {
     if (!initialized || alpha == 0) return;
     
+    if (r < 0) r = 0;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+
     int start_y = y < clip_rect.y ? clip_rect.y : y;
     int end_y = (y + h) > (clip_rect.y + clip_rect.h) ? (clip_rect.y + clip_rect.h) : (y + h);
     if (start_y >= end_y) return;
 
     uint32_t pitch_words = pitch / 4;
-    int r2 = r * r;
+    
+    constexpr int MAX_R = 512;
+    if (r > MAX_R) r = MAX_R;
+    
+    int corner_extents[MAX_R + 1] = {0};
+    if (r > 0) {
+        int cx_mid = r, cy_mid = 0;
+        int err = 1 - r;
+        while (cx_mid >= cy_mid) {
+            corner_extents[cy_mid] = cx_mid;
+            corner_extents[cx_mid] = cy_mid;
+            cy_mid++;
+            if (err < 0) {
+                err += 2 * cy_mid + 1;
+            } else {
+                cx_mid--;
+                err += 2 * (cy_mid - cx_mid) + 1;
+            }
+        }
+    }
+
+    const uint32_t src_rb = (color & 0xFF00FF) * alpha;
+    const uint32_t src_g  = (color & 0x00FF00) * alpha;
+    const uint32_t inv    = 255 - alpha;
 
     for (int cy = start_y; cy < end_y; ++cy) {
         int ry = cy - y; 
         int start_x = x;
         int end_x = x + w - 1;
 
-        // Fix 3: Gracefully handle cases where h < 2*r by taking max(dx) of overlapping corners
-        if (ry < r || ry >= h - r) {
-            int dx_top = -1, dx_bot = -1;
-            
+        if (r > 0 && (ry < r || ry >= h - r)) {
+            int dx_top = 0, dx_bot = 0;
             if (ry < r) {
-                int dy = r - ry;
-                while ((dx_top + 1) * (dx_top + 1) + dy * dy <= r2) dx_top++;
+                dx_top = corner_extents[r - ry];
             }
             if (ry >= h - r) {
-                int dy = ry - (h - 1 - r);
-                while ((dx_bot + 1) * (dx_bot + 1) + dy * dy <= r2) dx_bot++;
+                dx_bot = corner_extents[ry - (h - 1 - r)];
             }
-            
             int dx = dx_top > dx_bot ? dx_top : dx_bot;
             int corner_w = r - dx;
             start_x += corner_w;
@@ -270,8 +277,8 @@ void Framebuffer::draw_rounded_rect_alpha(int x, int y, int w, int h, int r, uin
         } else {
             for (int cx = start_x; cx <= end_x; ++cx) {
                 uint32_t bg = back_buffer[line_offset + cx];
-                uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
-                uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
+                uint32_t rb = (src_rb + (bg & 0xFF00FF) * inv) >> 8;
+                uint32_t g  = (src_g  + (bg & 0x00FF00) * inv) >> 8;
                 back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
             }
         }
@@ -279,106 +286,96 @@ void Framebuffer::draw_rounded_rect_alpha(int x, int y, int w, int h, int r, uin
 }
 
 void Framebuffer::draw_circle_filled(int xc, int yc, int r, uint32_t color) {
-    if (!initialized) return;
-    int r2 = r * r;
-    int start_y = (yc - r) < clip_rect.y ? clip_rect.y : (yc - r);
-    int end_y = (yc + r) > (clip_rect.y + clip_rect.h - 1) ? (clip_rect.y + clip_rect.h - 1) : (yc + r);
-    
-    uint32_t pitch_words = pitch / 4;
-    for (int cy = start_y; cy <= end_y; ++cy) {
-        int dy = cy - yc;
-        int dy2 = dy * dy;
-        int dx = 0;
-        while (dx*dx + dy2 <= r2) dx++;
-        dx--;
-        
-        int start_x = xc - dx;
-        int end_x = xc + dx;
-        
-        if (start_x < clip_rect.x) start_x = clip_rect.x;
-        if (end_x >= clip_rect.x + clip_rect.w) end_x = clip_rect.x + clip_rect.w - 1;
-        if (start_x > end_x) continue;
-        
-        uint32_t line_offset = cy * pitch_words;
-        for (int cx = start_x; cx <= end_x; ++cx) {
-            back_buffer[line_offset + cx] = color;
+    if (!initialized || r < 0) return;
+    if (r == 0) {
+        draw_pixel(xc, yc, color);
+        return;
+    }
+
+    int x = r, y = 0;
+    int err = 1 - r;
+
+    while (x >= y) {
+        draw_rect(xc - x, yc + y, 2 * x, 1, color);
+        draw_rect(xc - y, yc + x, 2 * y, 1, color);
+        draw_rect(xc - x, yc - y, 2 * x, 1, color);
+        draw_rect(xc - y, yc - x, 2 * y, 1, color);
+
+        y++;
+        if (err < 0) {
+            err += 2 * y + 1;
+        } else {
+            x--;
+            err += 2 * (y - x) + 1;
         }
     }
 }
 
 void Framebuffer::draw_circle_filled_alpha(int xc, int yc, int r, uint32_t color, uint8_t alpha) {
-    if (!initialized || alpha == 0) return;
-    int r2 = r * r;
-    int start_y = (yc - r) < clip_rect.y ? clip_rect.y : (yc - r);
-    int end_y = (yc + r) > (clip_rect.y + clip_rect.h - 1) ? (clip_rect.y + clip_rect.h - 1) : (yc + r);
-    
-    uint32_t pitch_words = pitch / 4;
-    for (int cy = start_y; cy <= end_y; ++cy) {
-        int dy = cy - yc;
-        int dy2 = dy * dy;
-        int dx = 0;
-        while (dx*dx + dy2 <= r2) dx++;
-        dx--;
-        
-        int start_x = xc - dx;
-        int end_x = xc + dx;
-        
-        if (start_x < clip_rect.x) start_x = clip_rect.x;
-        if (end_x >= clip_rect.x + clip_rect.w) end_x = clip_rect.x + clip_rect.w - 1;
-        if (start_x > end_x) continue;
-        
-        uint32_t line_offset = cy * pitch_words;
-        if (alpha == 255) {
-            for (int cx = start_x; cx <= end_x; ++cx) {
-                back_buffer[line_offset + cx] = color;
-            }
+    if (!initialized || alpha == 0 || r < 0) return;
+    if (r == 0) {
+        draw_pixel(xc, yc, color);
+        return;
+    }
+
+    int x = r, y = 0;
+    int err = 1 - r;
+
+    while (x >= y) {
+        draw_rect_alpha(xc - x, yc + y, 2 * x, 1, color, alpha);
+        draw_rect_alpha(xc - y, yc + x, 2 * y, 1, color, alpha);
+        draw_rect_alpha(xc - x, yc - y, 2 * x, 1, color, alpha);
+        draw_rect_alpha(xc - y, yc - x, 2 * y, 1, color, alpha);
+
+        y++;
+        if (err < 0) {
+            err += 2 * y + 1;
         } else {
-            for (int cx = start_x; cx <= end_x; ++cx) {
-                uint32_t bg = back_buffer[line_offset + cx];
-                uint32_t rb = (((color & 0xFF00FF) * alpha) + ((bg & 0xFF00FF) * (255 - alpha))) >> 8;
-                uint32_t g  = (((color & 0x00FF00) * alpha) + ((bg & 0x00FF00) * (255 - alpha))) >> 8;
-                back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
-            }
+            x--;
+            err += 2 * (y - x) + 1;
         }
     }
 }
 
 static uint32_t wallpaper_lut[3000];
 
-void Framebuffer::generate_wallpaper_procedural() {
+void Framebuffer::generate_wallpaper_procedural(uint32_t* dst) {
     uint32_t pitch_words = pitch / 4;
 
     if (wallpaper_theme_id == 3) {
         for (uint32_t cy = 0; cy < height; ++cy) {
             uint32_t line_offset = cy * pitch_words;
             for (uint32_t cx = 0; cx < width; ++cx) {
-                back_buffer[line_offset + cx] = 0x001B1B1F;
+                dst[line_offset + cx] = 0x001B1B1F;
             }
         }
         return;
     } else if (wallpaper_theme_id == 4) {
         for (uint32_t cy = 0; cy < height; ++cy) {
             uint32_t line_offset = cy * pitch_words;
+            uint32_t cy2 = cy * cy;
+            uint32_t cx2 = 0;
             for (uint32_t cx = 0; cx < width; ++cx) {
-                uint32_t dist_sq = cx * cx + cy * cy;
+                uint32_t dist_sq = cx2 + cy2;
                 uint32_t factor = (dist_sq * 16777ULL) >> 26;
                 factor = factor & 0xFF;
                 uint32_t r = ((0x5E * (255 - factor) + 0xEC * factor) * 257) >> 16;
                 uint32_t g = ((0x21 * (255 - factor) + 0x48 * factor) * 257) >> 16;
                 uint32_t b = ((0xD0 * (255 - factor) + 0x99 * factor) * 257) >> 16;
-                back_buffer[line_offset + cx] = (r << 16) | (g << 8) | b;
+                dst[line_offset + cx] = (r << 16) | (g << 8) | b;
+                cx2 += 2 * cx + 1;
             }
         }
         return;
     }
 
-    uint8_t r1 = 0x5E, g1 = 0x21, b1 = 0xD0; // Royal Purple
-    uint8_t r2 = 0x0F, g2 = 0x52, b2 = 0xBA; // Sapphire Blue
+    uint8_t r1 = 0x5E, g1 = 0x21, b1 = 0xD0;
+    uint8_t r2 = 0x0F, g2 = 0x52, b2 = 0xBA;
 
-    if (wallpaper_theme_id == 1) { // Sunset
+    if (wallpaper_theme_id == 1) { 
         r1 = 0xEC; g1 = 0x48; b1 = 0x99;
         r2 = 0xF5; g2 = 0x9E; b2 = 0x0B;
-    } else if (wallpaper_theme_id == 2) { // Forest
+    } else if (wallpaper_theme_id == 2) { 
         r1 = 0x05; g1 = 0x96; b1 = 0x69;
         r2 = 0x0D; g2 = 0x94; b2 = 0x88;
     }
@@ -399,7 +396,7 @@ void Framebuffer::generate_wallpaper_procedural() {
         for (uint32_t cx = 0; cx < width; ++cx) {
             uint32_t dist = cx + cy;
             if (dist >= 3000) dist = 2999;
-            back_buffer[line_offset + cx] = wallpaper_lut[dist];
+            dst[line_offset + cx] = wallpaper_lut[dist];
         }
     }
 }
@@ -407,16 +404,12 @@ void Framebuffer::generate_wallpaper_procedural() {
 void Framebuffer::update_wallpaper_cache() {
     if (!initialized || !wallpaper_cache) return;
     
-    uint32_t* temp = back_buffer;
-    back_buffer = wallpaper_cache;
-    
     Rect old_clip = clip_rect;
     clip_rect = {0, 0, (int)width, (int)height};
     
-    generate_wallpaper_procedural();
+    generate_wallpaper_procedural(wallpaper_cache);
     
     clip_rect = old_clip;
-    back_buffer = temp;
 }
 
 void Framebuffer::draw_mac_wallpaper(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
@@ -435,10 +428,10 @@ void Framebuffer::draw_mac_wallpaper(uint32_t x, uint32_t y, uint32_t w, uint32_
     if (start_x >= end_x || start_y >= end_y) return;
 
     uint32_t pitch_words = pitch / 4;
-    uint32_t bytes_to_copy = (end_x - start_x) * sizeof(uint32_t);
+    uint64_t bytes_to_copy = (uint64_t)(end_x - start_x) * sizeof(uint32_t);
 
     for (int cy = start_y; cy < end_y; ++cy) {
-        uint32_t line_offset = cy * pitch_words;
+        uint64_t line_offset = (uint64_t)cy * pitch_words;
         memcpy(&back_buffer[line_offset + start_x], 
                &wallpaper_cache[line_offset + start_x], 
                bytes_to_copy);
@@ -478,11 +471,20 @@ void Framebuffer::draw_char(char c, uint32_t x, uint32_t y, uint32_t color) {
     uint8_t uc = (uint8_t)c;
     if (uc > 127) return;
     const uint8_t* glyph = font_8x8[uc];
+    uint32_t pitch_words = pitch / 4;
+    
     for (int row = 0; row < 8; ++row) {
+        int py = (int)y + row;
+        if (py < clip_rect.y || py >= clip_rect.y + clip_rect.h) continue;
+        
         uint8_t row_data = glyph[row];
+        uint32_t line_off = py * pitch_words;
         for (int col = 0; col < 8; ++col) {
+            int px = (int)x + col;
+            if (px < clip_rect.x || px >= clip_rect.x + clip_rect.w) continue;
+            
             if (row_data & (0x80 >> col)) {
-                draw_pixel(x + col, y + row, color);
+                back_buffer[line_off + px] = color;
             }
         }
     }
@@ -504,36 +506,30 @@ void Framebuffer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
 
 void Framebuffer::swap_buffers() {
     if (!initialized) return;
-    
-    // Fix 1: Use a flat 32-bit loop. The compiler with -O2 will auto-vectorize this
-    // safely into 256-bit/128-bit writes, avoiding alignment traps and shearing 
-    // caused by manually enforcing 64-bit blocks when pitch lacks 8-byte alignment.
-    uint32_t total_words = (height * pitch) / 4;
-    for (uint32_t i = 0; i < total_words; ++i) {
-        virtual_base[i] = back_buffer[i];
-    }
+    uint64_t total_bytes = (uint64_t)height * pitch;
+    memcpy(virtual_base, back_buffer, total_bytes);
 }
 
 void Framebuffer::swap_dirty_rect(Rect r) {
     if (!initialized) return;
 
-    int x0 = r.x; if (x0 < 0) x0 = 0;
-    int y0 = r.y; if (y0 < 0) y0 = 0;
-    int x1 = r.x + r.w; if (x1 > (int)width) x1 = width;
-    int y1 = r.y + r.h; if (y1 > (int)height) y1 = height;
+    int x1 = r.x; if (x1 < 0) x1 = 0;
+    int y1 = r.y; if (y1 < 0) y1 = 0;
+    int x2 = r.x + r.w; if (x2 > (int)width) x2 = width;
+    int y2 = r.y + r.h; if (y2 > (int)height) y2 = height;
     
-    if (x0 >= x1 || y0 >= y1) return;
+    if (x2 < x1) x2 = x1;
+    if (y2 < y1) y2 = y1;
+
+    if (x1 >= x2 || y1 >= y2) return;
 
     uint32_t pitch_words = pitch / 4;
-    for (int y = y0; y < y1; ++y) {
-        uint32_t offset = y * pitch_words;
-        for (int x = x0; x < x1; ++x) {
-            virtual_base[offset + x] = back_buffer[offset + x];
-        }
+    uint64_t bytes_to_copy = (uint64_t)(x2 - x1) * sizeof(uint32_t);
+    for (int y = y1; y < y2; ++y) {
+        uint64_t line_offset = (uint64_t)y * pitch_words;
+        memcpy(virtual_base + line_offset + x1, back_buffer + line_offset + x1, bytes_to_copy);
     }
 }
-
-extern "C" void* memcpy(void* dest, const void* src, size_t n);
 
 void Framebuffer::blit_buffer(int x, int y, int w, int h, const uint32_t* src_buf) {
     if (!initialized || !src_buf) return;
@@ -551,41 +547,17 @@ void Framebuffer::blit_buffer(int x, int y, int w, int h, const uint32_t* src_bu
 
     uint32_t pitch_words = pitch / 4;
     uint32_t words_to_copy = end_x - start_x;
-    uint32_t bytes_to_copy = words_to_copy * sizeof(uint32_t);
+    uint64_t bytes_to_copy = (uint64_t)words_to_copy * sizeof(uint32_t);
 
     for (int cy = start_y; cy < end_y; ++cy) {
         int src_y = cy - y;
-        uint32_t line_offset = cy * pitch_words;
+        uint64_t line_offset = (uint64_t)cy * pitch_words;
         memcpy(&back_buffer[line_offset + start_x], &src_buf[src_y * w + (start_x - x)], bytes_to_copy);
     }
 }
 
 void Framebuffer::swap_dirty_rect_fast(Rect r) {
-    if (!initialized) return;
-
-    int x1 = r.x;
-    int y1 = r.y;
-    int x2 = r.x + r.w;
-    int y2 = r.y + r.h;
-
-    // Enforce hard hardware boundaries
-    if (x1 < 0) x1 = 0;
-    if (y1 < 0) y1 = 0;
-    if (x2 > (int)width) x2 = (int)width;
-    if (y2 > (int)height) y2 = (int)height;
-    
-    // Prevent inversion anomalies
-    if (x2 < x1) x2 = x1;
-    if (y2 < y1) y2 = y1;
-
-    if (x1 >= x2 || y1 >= y2) return;
-
-    uint32_t pitch_words = pitch / 4;
-    uint32_t bytes_to_copy = (x2 - x1) * sizeof(uint32_t);
-    for (int y = y1; y < y2; ++y) {
-        uint32_t line_offset = y * pitch_words;
-        memcpy(virtual_base + line_offset + x1, back_buffer + line_offset + x1, bytes_to_copy);
-    }
+    swap_dirty_rect(r);
 }
 
 } // namespace drivers

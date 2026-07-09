@@ -227,6 +227,18 @@ void TtfRenderer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
         return;
     }
     
+    Rect clip = Framebuffer::get_clip_rect();
+    bool has_newline = false;
+    for (const char* p = str; *p; p++) {
+        if (*p == '\n') { has_newline = true; break; }
+    }
+    if (!has_newline) {
+        int font_h = (int)size;
+        if ((int)y - font_h >= clip.y + clip.h || (int)y + font_h * 2 <= clip.y || (int)x >= clip.x + clip.w) {
+            return;
+        }
+    }
+    
     FontSizeCache* cache = get_or_create_size_cache(size);
     if (!cache) return;
     
@@ -237,7 +249,6 @@ void TtfRenderer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
     
     uint32_t cx = x;
     uint32_t cy = y;
-    Rect clip = Framebuffer::get_clip_rect();
     
     while (*str) {
         uint8_t uc = (uint8_t)*str;
