@@ -26,6 +26,12 @@ public:
     // Check if the transmit buffer is empty
     static bool is_transmit_empty();
 
+    // Check if data has been received
+    static bool is_received();
+
+    // Read a character from the serial port
+    static char read_char();
+
     // Write a single character to the serial port
     static void putc(char c);
 

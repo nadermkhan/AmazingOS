@@ -3,6 +3,7 @@
 #include "gdt.hpp"
 #include "vmm.hpp"
 #include "../drivers/serial.hpp"
+#include "syscall.hpp"
 
 extern "C" {
     kernel::Thread* current_thread = nullptr;
@@ -15,6 +16,7 @@ static Thread* run_queue_head = nullptr;
 static Thread* run_queue_tail = nullptr;
 
 static Thread main_thread;
+static Thread* all_threads_head = nullptr;
 static uint64_t next_thread_id = 0;
 
 // Shared pointers for asynchronous thread resource reclamation (reaper logic)
@@ -78,6 +80,11 @@ void scheduler_init() {
     main_thread.rsp0 = (uint64_t)boot_stack_top;
     main_thread.next = nullptr;
     main_thread.pml4_phys = active_pml4;
+    main_thread.waiting_for_pid = 0;
+    main_thread.exit_status = 0;
+    main_thread.parent_id = 0;
+    main_thread.all_next = nullptr;
+    all_threads_head = &main_thread;
 
     // Initialize file descriptor table for main thread
     for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; ++i) {
@@ -142,6 +149,9 @@ Thread* thread_create(void (*func)(void*), void* arg) {
     t->rsp0 = (uint64_t)stack_page + 4096;
     t->next = nullptr;
     t->pml4_phys = current_thread ? current_thread->pml4_phys : active_pml4;
+    t->waiting_for_pid = 0;
+    t->exit_status = 0;
+    t->parent_id = 0;
 
     // Initialize file descriptor table
     for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; ++i) {
@@ -167,6 +177,8 @@ Thread* thread_create(void (*func)(void*), void* arg) {
     // 4. Add to run queue
     IntLock lock;
     lock.lock();
+    t->all_next = all_threads_head;
+    all_threads_head = t;
     enqueue(t);
     lock.unlock();
 
@@ -211,20 +223,88 @@ void schedule() {
     next->state = THREAD_RUNNING;
     current_thread = next;
 
+    if (next->id == 8) {
+        drivers::Serial::print("[DEBUG] Thread 8 Stack Dump starting at next->rsp (");
+        char rsp_str[19];
+        rsp_str[0] = '0'; rsp_str[1] = 'x';
+        const char* hex_chars = "0123456789ABCDEF";
+        for (int x = 0; x < 16; ++x) rsp_str[2 + x] = hex_chars[(next->rsp >> ((15 - x) * 4)) & 0x0F];
+        rsp_str[18] = '\0';
+        drivers::Serial::print(rsp_str);
+        drivers::Serial::println("):");
+        
+        uint64_t* ptr = (uint64_t*)next->rsp;
+        for (int i = 0; i < 250; i++) {
+            char val_str[19];
+            val_str[0] = '0'; val_str[1] = 'x';
+            uint64_t val = ptr[i];
+            for (int x = 0; x < 16; ++x) val_str[2 + x] = hex_chars[(val >> ((15 - x) * 4)) & 0x0F];
+            val_str[18] = '\0';
+            
+            drivers::Serial::print("  [");
+            char idx_str[8];
+            int idx_t = 0;
+            int temp_i = i;
+            if (temp_i == 0) idx_str[idx_t++] = '0';
+            else {
+                char rev[8];
+                int r_idx = 0;
+                while (temp_i > 0) { rev[r_idx++] = '0' + (temp_i % 10); temp_i /= 10; }
+                while (r_idx > 0) idx_str[idx_t++] = rev[--r_idx];
+            }
+            idx_str[idx_t] = '\0';
+            drivers::Serial::print(idx_str);
+            drivers::Serial::print("]: ");
+            drivers::Serial::println(val_str);
+        }
+    }
+
+    if (next->id >= 4 || prev->id >= 4) {
+        drivers::Serial::print("[SCHED] Switch: ");
+        
+        char p_id[16];
+        int idx = 0;
+        uint64_t temp = prev->id;
+        if (temp == 0) p_id[idx++] = '0';
+        else {
+            char rev[16];
+            int r_idx = 0;
+            while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
+            while (r_idx > 0) p_id[idx++] = rev[--r_idx];
+        }
+        p_id[idx] = '\0';
+        drivers::Serial::print(p_id);
+        
+        drivers::Serial::print(" -> ");
+        
+        char n_id[16];
+        idx = 0;
+        temp = next->id;
+        if (temp == 0) n_id[idx++] = '0';
+        else {
+            char rev[16];
+            int r_idx = 0;
+            while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
+            while (r_idx > 0) n_id[idx++] = rev[--r_idx];
+        }
+        n_id[idx] = '\0';
+        drivers::Serial::println(n_id);
+    }
+
     // Switch address space if necessary (and flush TLB)
     uint64_t current_cr3;
     __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(current_cr3));
     current_cr3 &= ~0xFFFULL;
     if (next->pml4_phys != current_cr3) {
-        drivers::Serial::print("[SCHED] Switching CR3 PML4 base to: ");
-        char hex_buf[19];
-        hex_buf[0] = '0'; hex_buf[1] = 'x';
-        const char* hex_chars = "0123456789ABCDEF";
-        for (int x = 0; x < 16; ++x) {
-            hex_buf[2 + x] = hex_chars[(next->pml4_phys >> ((15 - x) * 4)) & 0x0F];
-        }
-        hex_buf[18] = '\0';
-        drivers::Serial::println(hex_buf);
+        // drivers::Serial::print("[SCHED] Switching CR3 PML4 base to: ");
+        // char hex_buf[19];
+        // hex_buf[0] = '0'; hex_buf[1] = 'x';
+        // const char* hex_chars = "0123456789ABCDEF";
+        // for (int x = 0; x < 16; ++x) {
+        //     hex_buf[2 + x] = hex_chars[(next->pml4_phys >> ((15 - x) * 4)) & 0x0F];
+        // }
+        // hex_buf[18] = '\0';
+        // drivers::Serial::println(hex_buf);
         active_pml4 = next->pml4_phys;
         __asm__ __volatile__ ("mov %0, %%cr3" : : "r"(next->pml4_phys) : "memory");
     }
@@ -238,7 +318,7 @@ void schedule() {
     lock.unlock();
 }
 
-void thread_exit() {
+void thread_exit(int status) {
     IntLock lock;
     lock.lock();
 
@@ -257,7 +337,43 @@ void thread_exit() {
     }
 
     Thread* current = current_thread;
+    current->exit_status = status;
     current->state = THREAD_TERMINATED;
+
+    // Scan all threads to wake up waiting parent or re-parent orphaned children
+    Thread* prev_t = nullptr;
+    Thread* curr_t = all_threads_head;
+    while (curr_t) {
+        Thread* next_t = curr_t->all_next;
+        if (curr_t->state == THREAD_BLOCKED && curr_t->waiting_for_pid == current->id) {
+            // Wake up parent
+            curr_t->state = THREAD_RUNNABLE;
+            curr_t->waiting_for_pid = 0;
+            enqueue(curr_t);
+        }
+        
+        if (curr_t->parent_id == current->id) {
+            // Re-parent orphan to main thread (0)
+            curr_t->parent_id = 0;
+            if (curr_t->state == THREAD_TERMINATED) {
+                // Reap orphan zombie immediately
+                // Remove from all_threads list
+                if (prev_t) {
+                    prev_t->all_next = next_t;
+                } else {
+                    all_threads_head = next_t;
+                }
+                kfree(curr_t->stack_limit);
+                delete curr_t;
+                // Since we deleted curr_t, do not update prev_t
+                curr_t = next_t;
+                continue;
+            }
+        }
+        
+        prev_t = curr_t;
+        curr_t = next_t;
+    }
 
     // Retrieve next runnable thread
     Thread* next = dequeue();
@@ -271,9 +387,14 @@ void thread_exit() {
     next->state = THREAD_RUNNING;
     current_thread = next;
 
-    // Set terminated thread resources for cleanup by next scheduled thread
-    stack_to_free = current->stack_limit;
-    thread_to_free = current;
+    // Set terminated thread resources for cleanup ONLY if parent is 0 (detached/kernel thread)
+    if (current->parent_id == 0) {
+        stack_to_free = current->stack_limit;
+        thread_to_free = current;
+    } else {
+        stack_to_free = nullptr;
+        thread_to_free = nullptr;
+    }
 
     // Switch address space if necessary (and flush TLB)
     uint64_t current_cr3;
@@ -299,10 +420,182 @@ Thread* scheduler_get_current() {
     return current_thread;
 }
 
+int scheduler_waitpid(uint64_t pid, int* wstatus) {
+    IntLock lock;
+    lock.lock();
+
+    drivers::Serial::print("[WAITPID] Parent ");
+    char parent_id_str[16];
+    int idx = 0;
+    uint64_t temp = current_thread->id;
+    if (temp == 0) parent_id_str[idx++] = '0';
+    else {
+        char rev[16];
+        int r_idx = 0;
+        while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
+        while (r_idx > 0) parent_id_str[idx++] = rev[--r_idx];
+    }
+    parent_id_str[idx] = '\0';
+    drivers::Serial::print(parent_id_str);
+    
+    drivers::Serial::print(" waiting for child ");
+    char child_id_str[16];
+    idx = 0;
+    temp = pid;
+    if (temp == 0) child_id_str[idx++] = '0';
+    else {
+        char rev[16];
+        int r_idx = 0;
+        while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
+        while (r_idx > 0) child_id_str[idx++] = rev[--r_idx];
+    }
+    child_id_str[idx] = '\0';
+    drivers::Serial::print(child_id_str);
+    drivers::Serial::print(". Current active threads: ");
+    
+    Thread* t_debug = all_threads_head;
+    while (t_debug) {
+        char tid_str[16];
+        idx = 0;
+        temp = t_debug->id;
+        if (temp == 0) tid_str[idx++] = '0';
+        else {
+            char rev[16];
+            int r_idx = 0;
+            while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
+            while (r_idx > 0) tid_str[idx++] = rev[--r_idx];
+        }
+        tid_str[idx] = '\0';
+        drivers::Serial::print(tid_str);
+        
+        if (t_debug->state == THREAD_RUNNING) drivers::Serial::print("(RUNNING) ");
+        else if (t_debug->state == THREAD_RUNNABLE) drivers::Serial::print("(RUNNABLE) ");
+        else if (t_debug->state == THREAD_BLOCKED) drivers::Serial::print("(BLOCKED) ");
+        else if (t_debug->state == THREAD_TERMINATED) drivers::Serial::print("(TERMINATED) ");
+        t_debug = t_debug->all_next;
+    }
+    drivers::Serial::println("");
+
+    // 1. Find child thread
+    Thread* child = nullptr;
+    Thread* curr = all_threads_head;
+    while (curr) {
+        if (curr->id == pid) {
+            child = curr;
+            break;
+        }
+        curr = curr->all_next;
+    }
+
+    if (!child) {
+        lock.unlock();
+        return -1; // -ECHILD
+    }
+
+    // 2. Check if child is a zombie (already terminated)
+    if (child->state == THREAD_TERMINATED) {
+        int status = child->exit_status;
+        if (wstatus) {
+            *wstatus = status;
+        }
+
+        // Clean up child thread structures completely (reaping the zombie)
+        if (all_threads_head == child) {
+            all_threads_head = child->all_next;
+        } else {
+            Thread* p = all_threads_head;
+            while (p && p->all_next != child) {
+                p = p->all_next;
+            }
+            if (p) {
+                p->all_next = child->all_next;
+            }
+        }
+
+        kfree(child->stack_limit);
+        delete child;
+
+        lock.unlock();
+        return (int)pid;
+    }
+
+    // 3. Child is still running, so we block the parent
+    Thread* parent = current_thread;
+    parent->state = THREAD_BLOCKED;
+    parent->waiting_for_pid = pid;
+
+    // Yield CPU control
+    lock.unlock();
+    schedule();
+    lock.lock();
+
+    // After waking up, the child is guaranteed to be terminated!
+    child = nullptr;
+    curr = all_threads_head;
+    while (curr) {
+        if (curr->id == pid) {
+            child = curr;
+            break;
+        }
+        curr = curr->all_next;
+    }
+
+    if (child && child->state == THREAD_TERMINATED) {
+        int status = child->exit_status;
+        if (wstatus) {
+            *wstatus = status;
+        }
+
+        // Remove from all_threads list
+        if (all_threads_head == child) {
+            all_threads_head = child->all_next;
+        } else {
+            Thread* p = all_threads_head;
+            while (p && p->all_next != child) {
+                p = p->all_next;
+            }
+            if (p) {
+                p->all_next = child->all_next;
+            }
+        }
+
+        kfree(child->stack_limit);
+        delete child;
+    }
+
+    lock.unlock();
+    return (int)pid;
+}
+
 void scheduler_enqueue(Thread* t) {
     IntLock lock;
     lock.lock();
     enqueue(t);
+    lock.unlock();
+}
+
+void scheduler_register_thread(Thread* t) {
+    IntLock lock;
+    lock.lock();
+    t->all_next = all_threads_head;
+    all_threads_head = t;
+    lock.unlock();
+}
+
+void scheduler_unregister_thread(Thread* t) {
+    IntLock lock;
+    lock.lock();
+    if (all_threads_head == t) {
+        all_threads_head = t->all_next;
+    } else {
+        Thread* curr = all_threads_head;
+        while (curr && curr->all_next != t) {
+            curr = curr->all_next;
+        }
+        if (curr) {
+            curr->all_next = t->all_next;
+        }
+    }
     lock.unlock();
 }
 

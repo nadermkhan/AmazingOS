@@ -118,75 +118,20 @@ static inline void user_exit() {
 
 // User-space thread entry point
 void user_thread_entry() {
-    // 1. Path "/tar/hello.txt" constructed on the stack (User mapped space)
-    char path[15];
+    char path[13];
     path[0] = '/'; path[1] = 't'; path[2] = 'a'; path[3] = 'r'; path[4] = '/';
-    path[5] = 'h'; path[6] = 'e'; path[7] = 'l'; path[8] = 'l'; path[9] = 'o';
-    path[10] = '.'; path[11] = 't'; path[12] = 'x'; path[13] = 't'; path[14] = '\0';
+    path[5] = 'b'; path[6] = 'i'; path[7] = 'n'; path[8] = '/'; path[9] = 's';
+    path[10] = 'h'; path[11] = '\0';
 
-    int fd = user_open(path, 0);
-    if (fd < 0) {
-        char err_msg[13];
-        err_msg[0] = 'E'; err_msg[1] = 'r'; err_msg[2] = 'r'; err_msg[3] = 'o';
-        err_msg[4] = 'r'; err_msg[5] = ' '; err_msg[6] = 'O'; err_msg[7] = 'p';
-        err_msg[8] = 'e'; err_msg[9] = 'n'; err_msg[10] = '!'; err_msg[11] = '\n';
-        err_msg[12] = '\0';
-        user_write(err_msg, 12);
-        user_exit();
-    }
+    user_execve(path, nullptr, nullptr);
 
-    // Read and print file contents
-    char buf[64];
-    ssize_t bytes;
-    while ((bytes = user_read(fd, buf, sizeof(buf) - 1)) > 0) {
-        buf[bytes] = '\0';
-        user_write(buf, bytes);
-    }
-    user_close(fd);
-
-    // 2. Perform fork test
-    int pid = user_fork();
-    if (pid < 0) {
-        char err_msg[13];
-        err_msg[0] = 'F'; err_msg[1] = 'o'; err_msg[2] = 'r'; err_msg[3] = 'k';
-        err_msg[4] = ' '; err_msg[5] = 'E'; err_msg[6] = 'r'; err_msg[7] = 'r';
-        err_msg[8] = 'o'; err_msg[9] = 'r'; err_msg[10] = '!'; err_msg[11] = '\n';
-        err_msg[12] = '\0';
-        user_write(err_msg, 12);
-    } else if (pid == 0) {
-        char child_msg[29];
-        child_msg[0] = 'I'; child_msg[1] = 'm'; child_msg[2] = ' '; child_msg[3] = 'c';
-        child_msg[4] = 'h'; child_msg[5] = 'i'; child_msg[6] = 'l'; child_msg[7] = 'd';
-        child_msg[8] = '!'; child_msg[9] = ' '; child_msg[10] = 'C'; child_msg[11] = 'a';
-        child_msg[12] = 'l'; child_msg[13] = 'l'; child_msg[14] = 'i'; child_msg[15] = 'n';
-        child_msg[16] = 'g'; child_msg[17] = ' '; child_msg[18] = 'e'; child_msg[19] = 'x';
-        child_msg[20] = 'e'; child_msg[21] = 'c'; child_msg[22] = 'v'; child_msg[23] = 'e';
-        child_msg[24] = '.'; child_msg[25] = '.'; child_msg[26] = '.'; child_msg[27] = '\n';
-        child_msg[28] = '\0';
-        user_write(child_msg, 28);
-
-        char exec_path[19];
-        exec_path[0] = '/'; exec_path[1] = 't'; exec_path[2] = 'a'; exec_path[3] = 'r';
-        exec_path[4] = '/'; exec_path[5] = 'b'; exec_path[6] = 'i'; exec_path[7] = 'n';
-        exec_path[8] = '/'; exec_path[9] = 't'; exec_path[10] = 'e'; exec_path[11] = 's';
-        exec_path[12] = 't'; exec_path[13] = '_'; exec_path[14] = 'a'; exec_path[15] = 'p';
-        exec_path[16] = 'p'; exec_path[17] = '\0';
-
-        user_execve(exec_path, nullptr, nullptr);
-
-        char fail_msg[20];
-        fail_msg[0] = 'E'; fail_msg[1] = 'x'; fail_msg[2] = 'e'; fail_msg[3] = 'c';
-        fail_msg[4] = 'v'; fail_msg[5] = 'e'; fail_msg[6] = ' '; fail_msg[7] = 'F';
-        fail_msg[8] = 'a'; fail_msg[9] = 'i'; fail_msg[10] = 'l'; fail_msg[11] = 'e';
-        fail_msg[12] = 'd'; fail_msg[13] = '!'; fail_msg[14] = '\n'; fail_msg[15] = '\0';
-        user_write(fail_msg, 15);
-    } else {
-        char parent_msg[12];
-        parent_msg[0] = 'I'; parent_msg[1] = 'm'; parent_msg[2] = ' '; parent_msg[3] = 'p';
-        parent_msg[4] = 'a'; parent_msg[5] = 'r'; parent_msg[6] = 'e'; parent_msg[7] = 'n';
-        parent_msg[8] = 't'; parent_msg[9] = '!'; parent_msg[10] = '\n'; parent_msg[11] = '\0';
-        user_write(parent_msg, 11);
-    }
+    char fail_msg[22];
+    fail_msg[0] = 'S'; fail_msg[1] = 'h'; fail_msg[2] = 'e'; fail_msg[3] = 'l';
+    fail_msg[4] = 'l'; fail_msg[5] = ' '; fail_msg[6] = 'E'; fail_msg[7] = 'x';
+    fail_msg[8] = 'e'; fail_msg[9] = 'c'; fail_msg[10] = ' '; fail_msg[11] = 'F';
+    fail_msg[12] = 'a'; fail_msg[13] = 'i'; fail_msg[14] = 'l'; fail_msg[15] = 'e';
+    fail_msg[16] = 'd'; fail_msg[17] = '!'; fail_msg[18] = '\n'; fail_msg[19] = '\0';
+    user_write(fail_msg, 19);
 
     user_exit();
 }

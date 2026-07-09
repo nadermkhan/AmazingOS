@@ -1,5 +1,6 @@
 #include "syscall.hpp"
 #include "vmm.hpp"
+#include "pmm.hpp"
 #include "scheduler.hpp"
 #include "heap.hpp"
 #include "../drivers/serial.hpp"
@@ -24,6 +25,15 @@ constexpr int EBADF = 9;
 constexpr int ENOENT = 2;
 constexpr int EMFILE = 24;
 constexpr int EFAULT = 14;
+
+struct SharedMemSegment {
+    int key;
+    uint64_t phys_frames[256];
+    size_t page_count;
+    int ref_count;
+};
+
+static SharedMemSegment shm_segments[16];
 
 // MSR register offsets
 constexpr uint32_t MSR_EFER   = 0xC0000080;
@@ -84,6 +94,8 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
     // Read syscall number from RAX
     uint64_t syscall_num = frame->rax;
 
+
+
     switch (syscall_num) {
         case 1: { // sys_write (POSIX compliant)
             int fd = (int)frame->rdi;
@@ -135,8 +147,9 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
         }
 
         case 3: { // sys_exit
-            // Terminate the current user thread
-            thread_exit();
+            int status = (int)frame->rdi;
+            // Terminate the current user thread and pass status
+            thread_exit(status);
             // This case never returns
             break;
         }
@@ -373,12 +386,38 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
                 size_t read_bytes = 0;
                 while (read_bytes < count) {
                     char c = 0;
-                    while (!drivers::Ps2::poll_keyboard(c)) {
-                        schedule();
+                    bool got_char = false;
+                    while (!got_char) {
+                        if (drivers::Ps2::poll_keyboard(c)) {
+                            got_char = true;
+                        } else if (drivers::Serial::is_received()) {
+                            c = drivers::Serial::read_char();
+                            if (c == '\r') {
+                                c = '\n';
+                            }
+                            got_char = true;
+                        } else {
+                            schedule();
+                        }
                     }
-                    dest[read_bytes++] = c;
-                    if (c == '\n' || c == '\r') {
+                    if (c == '\b' || c == 127) {
+                        if (read_bytes > 0) {
+                            read_bytes--;
+                            char erase_seq[4] = {'\b', ' ', '\b', '\0'};
+                            drivers::Vga::print(erase_seq);
+                            drivers::Serial::print(erase_seq);
+                        }
+                    } else if (c == '\n' || c == '\r') {
+                        dest[read_bytes++] = '\n';
+                        char nl[2] = {'\n', '\0'};
+                        drivers::Vga::print(nl);
+                        drivers::Serial::print(nl);
                         break;
+                    } else {
+                        dest[read_bytes++] = c;
+                        char ech[2] = {c, '\0'};
+                        drivers::Vga::print(ech);
+                        drivers::Serial::print(ech);
                     }
                 }
                 frame->rax = read_bytes;
@@ -483,6 +522,44 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             uint64_t child_rsp0 = (uint64_t)child_stack + 4096;
             uint64_t child_frame_addr = child_rsp0 - stack_used;
 
+            drivers::Serial::print("[DEBUG] parent_rsp0: ");
+            char buf1[19]; buf1[0] = '0'; buf1[1] = 'x';
+            for (int x = 0; x < 16; ++x) buf1[2 + x] = hex_chars[(current_thread->rsp0 >> ((15 - x) * 4)) & 0x0F];
+            buf1[18] = '\0';
+            drivers::Serial::print(buf1);
+            
+            drivers::Serial::print(" parent_frame: ");
+            char buf2[19]; buf2[0] = '0'; buf2[1] = 'x';
+            for (int x = 0; x < 16; ++x) buf2[2 + x] = hex_chars[((uint64_t)frame >> ((15 - x) * 4)) & 0x0F];
+            buf2[18] = '\0';
+            drivers::Serial::print(buf2);
+            
+            drivers::Serial::print(" stack_used: ");
+            char buf3[16];
+            int idx = 0;
+            uint64_t temp = stack_used;
+            if (temp == 0) buf3[idx++] = '0';
+            else {
+                char rev[16];
+                int r_idx = 0;
+                while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
+                while (r_idx > 0) buf3[idx++] = rev[--r_idx];
+            }
+            buf3[idx] = '\0';
+            drivers::Serial::print(buf3);
+            
+            drivers::Serial::print(" child_rsp0: ");
+            char buf4[19]; buf4[0] = '0'; buf4[1] = 'x';
+            for (int x = 0; x < 16; ++x) buf4[2 + x] = hex_chars[(child_rsp0 >> ((15 - x) * 4)) & 0x0F];
+            buf4[18] = '\0';
+            drivers::Serial::print(buf4);
+            
+            drivers::Serial::print(" child_frame_addr: ");
+            char buf5[19]; buf5[0] = '0'; buf5[1] = 'x';
+            for (int x = 0; x < 16; ++x) buf5[2 + x] = hex_chars[(child_frame_addr >> ((15 - x) * 4)) & 0x0F];
+            buf5[18] = '\0';
+            drivers::Serial::println(buf5);
+
             // Copy kernel stack frame
             memcpy((void*)child_frame_addr, (void*)frame, stack_used);
 
@@ -502,12 +579,23 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
 
             // 4. Initialize child Thread structure
             child->rsp = (uint64_t)child_stack_ptr;
+
+            drivers::Serial::print("[DEBUG] child->rsp: ");
+            char buf6[19]; buf6[0] = '0'; buf6[1] = 'x';
+            const char* hex_chars_local_2 = "0123456789ABCDEF";
+            for (int x = 0; x < 16; ++x) buf6[2 + x] = hex_chars_local_2[(child->rsp >> ((15 - x) * 4)) & 0x0F];
+            buf6[18] = '\0';
+            drivers::Serial::println(buf6);
+
             child->id = scheduler_generate_id();
             child->state = THREAD_RUNNABLE;
             child->stack_limit = child_stack;
             child->rsp0 = child_rsp0;
             child->pml4_phys = child_pml4;
             child->next = nullptr;
+            child->waiting_for_pid = 0;
+            child->exit_status = 0;
+            child->parent_id = current_thread->id;
 
             // Copy file descriptors
             for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; i++) {
@@ -520,9 +608,10 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
                 }
             }
 
-            // Enqueue child thread
+            // Register and Enqueue child thread
+            scheduler_register_thread(child);
             scheduler_enqueue(child);
-            drivers::Serial::println("[SYSCALL] sys_fork child thread successfully enqueued.");
+            drivers::Serial::println("[SYSCALL] sys_fork child thread successfully registered and enqueued.");
 
             // Return child ID to the parent process
             frame->rax = child->id;
@@ -534,6 +623,9 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             char* const* argv = (char* const*)frame->rsi;
             char* const* envp = (char* const*)frame->rdx;
             (void)envp;
+
+            drivers::Serial::print("[SYSCALL] sys_execve called for path: ");
+            drivers::Serial::println(path ? path : "NULL");
 
             // Validate path pointer
             size_t len = 0;
@@ -635,6 +727,113 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             frame->rdi = argc;
             frame->rsi = argv_address;
             frame->rax = 0;
+            break;
+        }
+
+        case 13: { // sys_waitpid
+            int target_pid = (int)frame->rdi;
+            int* wstatus = (int*)frame->rsi;
+            int options = (int)frame->rdx;
+            (void)options;
+
+            if (wstatus && !syscall_validate_buffer(wstatus, sizeof(int))) {
+                frame->rax = -EFAULT;
+                break;
+            }
+
+            frame->rax = (uint64_t)scheduler_waitpid(target_pid, wstatus);
+            break;
+        }
+
+        case 14: { // sys_shm_get
+            int key = (int)frame->rdi;
+            size_t size = frame->rsi;
+
+            size_t page_count = (size + 4095) / 4096;
+            if (page_count == 0 || page_count > 256) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            int shmid = -1;
+            uint64_t rflags;
+            __asm__ __volatile__ ("pushfq; popq %0; cli" : "=r"(rflags));
+
+            for (int i = 0; i < 16; i++) {
+                if (shm_segments[i].ref_count > 0 && shm_segments[i].key == key) {
+                    shmid = i;
+                    break;
+                }
+            }
+
+            if (shmid == -1) {
+                for (int i = 0; i < 16; i++) {
+                    if (shm_segments[i].ref_count == 0) {
+                        shmid = i;
+                        break;
+                    }
+                }
+
+                if (shmid != -1) {
+                    shm_segments[shmid].key = key;
+                    shm_segments[shmid].page_count = page_count;
+                    shm_segments[shmid].ref_count = 1;
+                    bool ok = true;
+                    for (size_t i = 0; i < page_count; i++) {
+                        uint64_t frame_phys = pmm_alloc_frame();
+                        if (!frame_phys) {
+                            ok = false;
+                            for (size_t j = 0; j < i; j++) {
+                                pmm_free_frame(shm_segments[shmid].phys_frames[j]);
+                            }
+                            break;
+                        }
+                        shm_segments[shmid].phys_frames[i] = frame_phys;
+                    }
+                    if (!ok) {
+                        shm_segments[shmid].ref_count = 0;
+                        shmid = -1;
+                    }
+                }
+            }
+
+            __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+
+            frame->rax = (uint64_t)shmid;
+            break;
+        }
+
+        case 15: { // sys_shm_at
+            int shmid = (int)frame->rdi;
+            uint64_t virt_addr = frame->rsi;
+
+            if (shmid < 0 || shmid >= 16 || shm_segments[shmid].ref_count == 0) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            if ((virt_addr & 0xFFFUL) != 0 || virt_addr < 0x400000000ULL) {
+                frame->rax = (uint64_t)-1;
+                break;
+            }
+
+            bool ok = true;
+            uint64_t rflags;
+            __asm__ __volatile__ ("pushfq; popq %0; cli" : "=r"(rflags));
+
+            size_t pages = shm_segments[shmid].page_count;
+            uint64_t flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER | VMM_FLAG_NO_EXECUTE;
+            for (size_t i = 0; i < pages; i++) {
+                uint64_t phys = shm_segments[shmid].phys_frames[i];
+                if (!vmm_map_page_in_pml4(current_thread->pml4_phys, virt_addr + i * 4096, phys, flags)) {
+                    ok = false;
+                    break;
+                }
+            }
+
+            __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
+
+            frame->rax = ok ? 0 : (uint64_t)-1;
             break;
         }
 

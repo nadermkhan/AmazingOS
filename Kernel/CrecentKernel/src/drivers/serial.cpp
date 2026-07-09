@@ -30,6 +30,14 @@ bool Serial::is_transmit_empty() {
     return (inb(COM1_PORT + 5) & 0x20) != 0;
 }
 
+bool Serial::is_received() {
+    return (inb(COM1_PORT + 5) & 1) != 0;
+}
+
+char Serial::read_char() {
+    return (char)inb(COM1_PORT);
+}
+
 void Serial::putc(char c) {
     while (!is_transmit_empty());
     outb(COM1_PORT, c);
