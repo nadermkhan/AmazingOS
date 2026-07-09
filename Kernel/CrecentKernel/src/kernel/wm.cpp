@@ -1247,14 +1247,14 @@ void Window::draw(bool is_active) {
     bool is_terminal = this->title_is("Terminal");
     WindowManager::draw_window_body(this, alpha, is_terminal);
 
-    // Fast-path: Skip heavy application rendering during active movement
+    // Fast-path: Skip heavy application rendering during active resizing
     // This stops vector fonts and HTML loops from starving the system tick timer
-    bool fast_mode = (this->is_dragging || (active && is_resizing_window));
+    bool fast_mode = (active && is_resizing_window);
     
     if (fast_mode) {
         int cx = rect.x + rect.w / 2;
         int cy = rect.y + rect.h / 2;
-        const char* msg = this->is_dragging ? "Moving..." : "Resizing...";
+        const char* msg = "Resizing...";
         WindowManager::draw_string(msg, cx - 40, cy, C_TEXT, 15.0f);
     } else {
         // Only draw client area content if it intersects the active clip rect

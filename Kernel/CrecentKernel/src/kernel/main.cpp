@@ -147,7 +147,7 @@ void user_security_entry() {
     uint64_t ret = user_syscall3(1, 1, 0x100000ULL, 10);
 
     char ok_msg[45];
-    if (ret == (uint64_t)-1) {
+    if (ret == (uint64_t)-1 || (int64_t)ret < 0) {
         ok_msg[0] = '['; ok_msg[1] = 'S'; ok_msg[2] = 'E'; ok_msg[3] = 'C'; ok_msg[4] = 'U';
         ok_msg[5] = 'R'; ok_msg[6] = 'I'; ok_msg[7] = 'T'; ok_msg[8] = 'Y'; ok_msg[9] = ']';
         ok_msg[10] = ' '; ok_msg[11] = 'K'; ok_msg[12] = 'e'; ok_msg[13] = 'r'; ok_msg[14] = 'n';
@@ -234,18 +234,18 @@ void user_paint_entry() {
     
     user_update_window(win_id, buffer);
 
-    char txt1[13];
+    volatile char txt1[13];
     txt1[0] = 'P'; txt1[1] = 'a'; txt1[2] = 'i'; txt1[3] = 'n'; txt1[4] = 't'; txt1[5] = ' '; 
     txt1[6] = 'C'; txt1[7] = 'a'; txt1[8] = 'n'; txt1[9] = 'v'; txt1[10] = 'a'; txt1[11] = 's'; txt1[12] = '\0';
     
-    char txt2[19];
+    volatile char txt2[19];
     txt2[0] = 'C'; txt2[1] = 'l'; txt2[2] = 'i'; txt2[3] = 'c'; txt2[4] = 'k'; txt2[5] = ' ';
     txt2[6] = 't'; txt2[7] = 'o'; txt2[8] = ' ';
     txt2[9] = 'd'; txt2[10] = 'r'; txt2[11] = 'a'; txt2[12] = 'w'; txt2[13] = ' ';
     txt2[14] = 'f'; txt2[15] = 'r'; txt2[16] = 'e'; txt2[17] = 'e'; txt2[18] = '\0';
 
-    user_draw_string(win_id, 15, 8, 0x001E293B, txt1, 16);
-    user_draw_string(win_id, 130, 10, 0x0064748B, txt2, 13);
+    user_draw_string(win_id, 15, 8, 0x001E293B, (const char*)txt1, 16);
+    user_draw_string(win_id, 130, 10, 0x0064748B, (const char*)txt2, 13);
 
     while (true) {
         Event ev;
@@ -263,8 +263,8 @@ void user_paint_entry() {
                     }
                 }
                 user_update_window(win_id, buffer);
-                user_draw_string(win_id, 15, 8, 0x001E293B, txt1, 16);
-                user_draw_string(win_id, 130, 10, 0x0064748B, txt2, 13);
+                user_draw_string(win_id, 15, 8, 0x001E293B, (const char*)txt1, 16);
+                user_draw_string(win_id, 130, 10, 0x0064748B, (const char*)txt2, 13);
             }
         }
         user_yield();

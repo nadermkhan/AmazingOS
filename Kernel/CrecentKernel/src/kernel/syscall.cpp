@@ -606,7 +606,85 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             }
 
             if (!syscall_validate_buffer(user_str, len)) {
-                drivers::Serial::println("[SYSCALL] Security violation: sys_draw_string passed invalid string pointer!");
+                drivers::Serial::print("[SYSCALL] Security violation: sys_draw_string passed invalid string pointer! Address: 0x");
+                const char* hex = "0123456789ABCDEF";
+                for (int h = 15; h >= 0; h--) {
+                    char c[2] = { hex[((uint64_t)user_str >> (h * 4)) & 0xF], '\0' };
+                    drivers::Serial::print(c);
+                }
+                drivers::Serial::print(" len: ");
+                char len_str[10];
+                int temp_len = len;
+                int li = 0;
+                if (temp_len == 0) len_str[li++] = '0';
+                while (temp_len > 0 && li < 9) {
+                    len_str[li++] = '0' + (temp_len % 10);
+                    temp_len /= 10;
+                }
+                len_str[li] = '\0';
+                for (int lj = li - 1; lj >= 0; lj--) {
+                    char c[2] = { len_str[lj], '\0' };
+                    drivers::Serial::print(c);
+                }
+                drivers::Serial::println("");
+
+                // Detailed VMM walk
+                uint64_t virt = (uint64_t)user_str;
+                uint64_t* pml4 = phys_to_virt<uint64_t>(active_pml4);
+                size_t pml4_idx = (virt >> 39) & 0x1FF;
+                size_t pdpt_idx = (virt >> 30) & 0x1FF;
+                size_t pd_idx   = (virt >> 21) & 0x1FF;
+                size_t pt_idx   = (virt >> 12) & 0x1FF;
+
+                drivers::Serial::print("  PML4 entry at idx ");
+                char idx_c[4] = { (char)('0' + (pml4_idx/100)), (char)('0' + ((pml4_idx/10)%10)), (char)('0' + (pml4_idx%10)), '\0' };
+                drivers::Serial::print(idx_c);
+                drivers::Serial::print(": 0x");
+                for (int h = 15; h >= 0; h--) {
+                    char c[2] = { hex[(pml4[pml4_idx] >> (h * 4)) & 0xF], '\0' };
+                    drivers::Serial::print(c);
+                }
+                drivers::Serial::println("");
+
+                if (pml4[pml4_idx] & kernel::VMM_FLAG_PRESENT) {
+                    uint64_t* pdpt = phys_to_virt<uint64_t>(pml4[pml4_idx] & 0x000FFFFFFFFFF000ULL);
+                    drivers::Serial::print("  PDPT entry at idx ");
+                    char idx_c2[4] = { (char)('0' + (pdpt_idx/100)), (char)('0' + ((pdpt_idx/10)%10)), (char)('0' + (pdpt_idx%10)), '\0' };
+                    drivers::Serial::print(idx_c2);
+                    drivers::Serial::print(": 0x");
+                    for (int h = 15; h >= 0; h--) {
+                        char c[2] = { hex[(pdpt[pdpt_idx] >> (h * 4)) & 0xF], '\0' };
+                        drivers::Serial::print(c);
+                    }
+                    drivers::Serial::println("");
+
+                    if (pdpt[pdpt_idx] & kernel::VMM_FLAG_PRESENT) {
+                        uint64_t* pd = phys_to_virt<uint64_t>(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000ULL);
+                        drivers::Serial::print("  PD entry at idx ");
+                        char idx_c3[4] = { (char)('0' + (pd_idx/100)), (char)('0' + ((pd_idx/10)%10)), (char)('0' + (pd_idx%10)), '\0' };
+                        drivers::Serial::print(idx_c3);
+                        drivers::Serial::print(": 0x");
+                        for (int h = 15; h >= 0; h--) {
+                            char c[2] = { hex[(pd[pd_idx] >> (h * 4)) & 0xF], '\0' };
+                            drivers::Serial::print(c);
+                        }
+                        drivers::Serial::println("");
+
+                        if ((pd[pd_idx] & kernel::VMM_FLAG_PRESENT) && !(pd[pd_idx] & kernel::VMM_FLAG_HUGE)) {
+                            uint64_t* pt = phys_to_virt<uint64_t>(pd[pd_idx] & 0x000FFFFFFFFFF000ULL);
+                            drivers::Serial::print("  PT entry at idx ");
+                            char idx_c4[4] = { (char)('0' + (pt_idx/100)), (char)('0' + ((pt_idx/10)%10)), (char)('0' + (pt_idx%10)), '\0' };
+                            drivers::Serial::print(idx_c4);
+                            drivers::Serial::print(": 0x");
+                            for (int h = 15; h >= 0; h--) {
+                                char c[2] = { hex[(pt[pt_idx] >> (h * 4)) & 0xF], '\0' };
+                                drivers::Serial::print(c);
+                            }
+                            drivers::Serial::println("");
+                        }
+                    }
+                }
+
                 frame->rax = (uint64_t)-1;
                 break;
             }

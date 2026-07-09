@@ -9,16 +9,7 @@ private:
     static uint8_t mouse_cycle;
     static uint8_t mouse_bytes[3];
     
-    // Top-Half atomic deltas and click states
-    static volatile int mouse_dx;
-    static volatile int mouse_dy;
-    static volatile bool mouse_left_pressed;
-    static volatile bool mouse_right_pressed;
-    static volatile bool mouse_dirty;
-
-    // Keyboard buffer
-    static volatile char keyboard_char;
-    static volatile bool keyboard_dirty;
+    // Ring buffers and state are managed statically in ps2.cpp
 
     // Hardware interface helpers
     static bool wait_write();
@@ -26,11 +17,13 @@ private:
     static void write_data(uint8_t val);
     static uint8_t read_data();
     static void write_cmd(uint8_t cmd);
+    static void send_mouse(uint8_t cmd);
+    static bool send_mouse_expect_ack(uint8_t cmd);
 
 public:
     static void init();
     static void handle_keyboard_interrupt();
-    static void handle_mouse_interrupt();
+    static void handle_mouse_interrupt(uint8_t status = 0);
     
     // Test injection helpers for automated verification
     static void inject_mouse_event(int dx, int dy, bool left, bool right);

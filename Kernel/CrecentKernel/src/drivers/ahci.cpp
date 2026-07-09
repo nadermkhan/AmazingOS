@@ -16,6 +16,7 @@ static void port_stop(HBAPort* port) {
 
     // Wait until ST and CR (Command List Running) are cleared
     while (1) {
+        __asm__ __volatile__ ("pause");
         if (port->cmd & 0x8000) continue; // CR running
         if (port->cmd & 0x0010) continue; // FRE running
         break;
@@ -225,6 +226,7 @@ bool Ahci::read_sectors(uint64_t lba, uint32_t count, void* buffer) {
 
     // Wait for completion
     while (1) {
+        __asm__ __volatile__ ("pause");
         if ((port->ci & 1) == 0) break;
         if (port->is & (1 << 30)) { // Task File Error
             Serial::print("[AHCI] Error: SATA disk read transaction failed! lba: ");
@@ -330,6 +332,7 @@ bool Ahci::write_sectors(uint64_t lba, uint32_t count, const void* buffer) {
 
     // Wait for completion
     while (1) {
+        __asm__ __volatile__ ("pause");
         if ((port->ci & 1) == 0) break;
         if (port->is & (1 << 30)) { // Task File Error
             Serial::println("[AHCI] Error: SATA disk write transaction failed!");
