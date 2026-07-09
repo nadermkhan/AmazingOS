@@ -29,7 +29,12 @@ $(TARGET_PE): $(OBJS)
 
 # Convert the PE executable to a standard ELF32 binary (required for Multiboot loaders)
 $(TARGET_ELF): $(TARGET_PE)
-	$(OBJCOPY) -O elf32-i386 $(TARGET_PE) $(TARGET_ELF)
+	$(OBJCOPY) -O elf32-i386 \
+		--change-section-lma .text-0x80000000 \
+		--change-section-lma .rdata-0x80000000 \
+		--change-section-lma .data-0x80000000 \
+		--change-section-lma .bss-0x80000000 \
+		$(TARGET_PE) $(TARGET_ELF)
 
 # Object files rules
 boot.o: src/boot/boot.S

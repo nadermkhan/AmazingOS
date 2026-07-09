@@ -70,19 +70,27 @@ boot_entry:
     popf
 
     # --- Set up Page Tables for 64-bit Transition ---
-    # PML4[0] -> PDPT
+    # PML4[0] (identity map) -> PDPT
     movl $pdpt, %eax
     orl $3, %eax       # Present + Writable
     movl %eax, pml4
+
+    # PML4[256] (Direct Physical Map base 0xFFFF800000000000) -> PDPT
+    movl %eax, pml4 + 256 * 8
+
+    # PML4[511] (Kernel virtual base 0xFFFFFFFF80000000) -> PDPT
+    movl %eax, pml4 + 511 * 8
 
     # PDPT[0..3] -> pd0..pd3 (maps 0GB - 4GB region)
     movl $pd0, %eax
     orl $3, %eax       # Present + Writable
     movl %eax, pdpt
+    movl %eax, pdpt + 510 * 8 # Map 0xFFFFFFFF80000000 -> pd0 (first 2GB)
 
     movl $pd1, %eax
     orl $3, %eax       # Present + Writable
     movl %eax, pdpt+8
+    movl %eax, pdpt + 511 * 8 # Map 0xFFFFFFFFC0000000 -> pd1 (second 2GB)
 
     movl $pd2, %eax
     orl $3, %eax       # Present + Writable
@@ -162,8 +170,9 @@ long_mode_start:
     # Clear RBP to start a clean stack trace
     xorq %rbp, %rbp
 
-    # Call C++ kernel entry point
-    call kmain
+    # Call C++ kernel entry point absolutely in the higher half
+    movabsq $kmain, %rax
+    call *%rax
 
     # In case kmain returns, disable interrupts and halt
 .halt_64:
@@ -184,7 +193,7 @@ gdt64_ptr:
     .quad gdt64
 
 
-.section .bss
+.section .boot
 .align 4096
 pml4:
     .skip 4096
@@ -199,6 +208,7 @@ pd2:
 pd3:
     .skip 4096
 
+.section .bss
 .align 16
 boot_stack_bottom:
     .skip 16384                 # 16KB stack

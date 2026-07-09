@@ -223,42 +223,6 @@ void schedule() {
     next->state = THREAD_RUNNING;
     current_thread = next;
 
-    if (next->id == 8) {
-        drivers::Serial::print("[DEBUG] Thread 8 Stack Dump starting at next->rsp (");
-        char rsp_str[19];
-        rsp_str[0] = '0'; rsp_str[1] = 'x';
-        const char* hex_chars = "0123456789ABCDEF";
-        for (int x = 0; x < 16; ++x) rsp_str[2 + x] = hex_chars[(next->rsp >> ((15 - x) * 4)) & 0x0F];
-        rsp_str[18] = '\0';
-        drivers::Serial::print(rsp_str);
-        drivers::Serial::println("):");
-        
-        uint64_t* ptr = (uint64_t*)next->rsp;
-        for (int i = 0; i < 250; i++) {
-            char val_str[19];
-            val_str[0] = '0'; val_str[1] = 'x';
-            uint64_t val = ptr[i];
-            for (int x = 0; x < 16; ++x) val_str[2 + x] = hex_chars[(val >> ((15 - x) * 4)) & 0x0F];
-            val_str[18] = '\0';
-            
-            drivers::Serial::print("  [");
-            char idx_str[8];
-            int idx_t = 0;
-            int temp_i = i;
-            if (temp_i == 0) idx_str[idx_t++] = '0';
-            else {
-                char rev[8];
-                int r_idx = 0;
-                while (temp_i > 0) { rev[r_idx++] = '0' + (temp_i % 10); temp_i /= 10; }
-                while (r_idx > 0) idx_str[idx_t++] = rev[--r_idx];
-            }
-            idx_str[idx_t] = '\0';
-            drivers::Serial::print(idx_str);
-            drivers::Serial::print("]: ");
-            drivers::Serial::println(val_str);
-        }
-    }
-
     if (next->id >= 4 || prev->id >= 4) {
         drivers::Serial::print("[SCHED] Switch: ");
         

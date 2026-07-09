@@ -589,7 +589,7 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
     }
 
     // 5. Initialize Physical Memory Manager (PMM)
-    bool pmm_ok = kernel::pmm_init(magic, maddr);
+    bool pmm_ok = kernel::pmm_init(magic, maddr + VMM_DIRECT_MAP_OFFSET);
     if (serial_ok) {
         if (pmm_ok) {
             drivers::Serial::println("[INIT] Physical Memory Manager (PMM) initialized.");
@@ -624,13 +624,14 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         bool fb_detected = false;
         bool is_bga = false;
 
-        uint32_t mb_flags = *(uint32_t*)maddr;
+        uint64_t virtual_maddr = maddr + VMM_DIRECT_MAP_OFFSET;
+        uint32_t mb_flags = *(uint32_t*)virtual_maddr;
         if (mb_flags & (1 << 11)) {
-            fb_phys = *(uint64_t*)(maddr + 88);
-            fb_pitch = *(uint32_t*)(maddr + 96);
-            fb_width = *(uint32_t*)(maddr + 100);
-            fb_height = *(uint32_t*)(maddr + 104);
-            fb_bpp = *(uint8_t*)(maddr + 108);
+            fb_phys = *(uint64_t*)(virtual_maddr + 88);
+            fb_pitch = *(uint32_t*)(virtual_maddr + 96);
+            fb_width = *(uint32_t*)(virtual_maddr + 100);
+            fb_height = *(uint32_t*)(virtual_maddr + 104);
+            fb_bpp = *(uint8_t*)(virtual_maddr + 108);
             fb_detected = true;
             if (serial_ok) {
                 drivers::Serial::println("[INIT] Graphical Framebuffer detected via Multiboot.");
@@ -711,7 +712,7 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         uint64_t tar_start = 0, tar_end = 0;
         bool tar_found = kernel::pmm_get_module(0, &tar_start, &tar_end);
         if (tar_found) {
-            fs::tarfs_init(tar_start, tar_end);
+            fs::tarfs_init(tar_start + VMM_DIRECT_MAP_OFFSET, tar_end + VMM_DIRECT_MAP_OFFSET);
         } else {
             if (serial_ok) {
                 drivers::Serial::println("[TarFS] Error: No Multiboot modules found!");

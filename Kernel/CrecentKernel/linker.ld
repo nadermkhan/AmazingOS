@@ -1,21 +1,31 @@
 ENTRY(boot_entry)
 
-_kernel_start = 0x100000;
+_kernel_start = 0xFFFFFFFF80100000;
 
 SECTIONS
 {
-    /* The kernel is loaded at 1MB */
+    /* The bootloader loads us at 1MB physical */
     . = 0x100000;
-
-    .text :
+    
+    .boot :
     {
-        /* Place the multiboot header first */
         KEEP(*(.multiboot_header))
+        *boot.o(*)
+    }
+
+    /* Page align the end of the boot bootstrap code */
+    . = ALIGN(4096);
+
+    /* Relocate location counter to the higher half, continuing contiguously */
+    . = 0xFFFFFFFF80000000 + .;
+
+    .text : AT(ADDR(.text) - 0xFFFFFFFF80000000)
+    {
         *(.text)
         *(.text.*)
     }
 
-    .rdata :
+    .rdata : AT(ADDR(.rdata) - 0xFFFFFFFF80000000)
     {
         *(.rodata)
         *(.rodata.*)
@@ -23,13 +33,13 @@ SECTIONS
         *(.rdata.*)
     }
 
-    .data :
+    .data : AT(ADDR(.data) - 0xFFFFFFFF80000000)
     {
         *(.data)
         *(.data.*)
     }
 
-    .bss :
+    .bss : AT(ADDR(.bss) - 0xFFFFFFFF80000000)
     {
         *(.bss)
         *(.bss.*)

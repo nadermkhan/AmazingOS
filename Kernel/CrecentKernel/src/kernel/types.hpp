@@ -28,3 +28,11 @@ struct Event {
     int mx, my;
     char key;
 };
+
+// Physical-to-Virtual Direct Physical Mapping (DPM) translation
+constexpr uint64_t VMM_DIRECT_MAP_OFFSET = 0xFFFF800000000000ULL;
+
+template <typename T>
+inline T* phys_to_virt(uint64_t phys) {
+    return (T*)(phys + VMM_DIRECT_MAP_OFFSET);
+}

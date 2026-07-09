@@ -97,7 +97,7 @@ bool e1000_init() {
 
     // 5. Setup Rx Ring
     uint64_t rx_ring_phys = kernel::pmm_alloc_frame();
-    rx_ring = (RxDescriptor*)rx_ring_phys;
+    rx_ring = phys_to_virt<RxDescriptor>(rx_ring_phys);
     for (int i = 0; i < 128; i++) {
         uint64_t rx_buf = kernel::pmm_alloc_frame();
         rx_ring[i].address = rx_buf;
@@ -115,7 +115,7 @@ bool e1000_init() {
 
     // 6. Setup Tx Ring
     uint64_t tx_ring_phys = kernel::pmm_alloc_frame();
-    tx_ring = (TxDescriptor*)tx_ring_phys;
+    tx_ring = phys_to_virt<TxDescriptor>(tx_ring_phys);
     for (int i = 0; i < 128; i++) {
         uint64_t tx_buf = kernel::pmm_alloc_frame();
         tx_ring[i].address = tx_buf;
@@ -145,7 +145,7 @@ bool e1000_send_packet(const void* data, uint16_t length) {
     TxDescriptor* desc = &tx_ring[tail];
 
     // Copy packet into the DMA buffer
-    char* buf_virt = (char*)desc->address;
+    char* buf_virt = phys_to_virt<char>(desc->address);
     for (uint16_t i = 0; i < length; i++) {
         buf_virt[i] = ((const char*)data)[i];
     }
@@ -180,7 +180,7 @@ uint16_t e1000_recv_packet(void* dest, uint16_t max_len) {
     if (len > max_len) len = max_len;
 
     // Copy packet out from the DMA buffer
-    char* buf_virt = (char*)desc->address;
+    char* buf_virt = phys_to_virt<char>(desc->address);
     for (uint16_t i = 0; i < len; i++) {
         ((char*)dest)[i] = buf_virt[i];
     }

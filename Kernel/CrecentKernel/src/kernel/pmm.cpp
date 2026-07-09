@@ -50,8 +50,8 @@ struct Mboot2MmapEntry {
 } __attribute__((packed));
 
 static void register_region(uint64_t base, uint64_t len, uint64_t guard_start, uint64_t guard_end) {
-    uint64_t kern_start = (uint64_t)_kernel_start;
-    uint64_t kern_end = (uint64_t)_kernel_end;
+    uint64_t kern_start = (uint64_t)_kernel_start - 0xFFFFFFFF80000000ULL;
+    uint64_t kern_end = (uint64_t)_kernel_end - 0xFFFFFFFF80000000ULL;
 
     // Align base up to 4KB page boundary
     uint64_t start = (base + 0xFFFULL) & ~0xFFFULL;
@@ -98,14 +98,14 @@ static void parse_multiboot1(uint64_t maddr) {
     uint32_t mmap_len = *(uint32_t*)(maddr + 44);
     uint32_t mmap_addr = *(uint32_t*)(maddr + 48);
 
-    uintptr_t curr = mmap_addr;
-    uintptr_t mmap_end = mmap_addr + mmap_len;
+    uintptr_t curr = mmap_addr + VMM_DIRECT_MAP_OFFSET;
+    uintptr_t mmap_end = curr + mmap_len;
 
     while (curr < mmap_end) {
         Mboot1MmapEntry* entry = (Mboot1MmapEntry*)curr;
         if (entry->type == 1) { // Type 1 is available usable RAM
             // Guard MBI region (estimated 4KB starting at maddr)
-            register_region(entry->addr, entry->len, maddr, maddr + 4096);
+            register_region(entry->addr, entry->len, maddr - VMM_DIRECT_MAP_OFFSET, (maddr - VMM_DIRECT_MAP_OFFSET) + 4096);
         }
         curr += entry->size + 4;
     }
@@ -130,7 +130,7 @@ static void parse_multiboot2(uint64_t maddr) {
             while (entry_ptr < tag_end) {
                 Mboot2MmapEntry* entry = (Mboot2MmapEntry*)entry_ptr;
                 if (entry->type == 1) { // Usable RAM
-                    register_region(entry->base_addr, entry->length, maddr, mbi_end);
+                    register_region(entry->base_addr, entry->length, maddr - VMM_DIRECT_MAP_OFFSET, mbi_end - VMM_DIRECT_MAP_OFFSET);
                 }
                 entry_ptr += entry_size;
             }
@@ -159,9 +159,10 @@ static void pmm_find_modules(uint32_t magic, uint64_t maddr) {
         if (flags & (1 << 3)) {
             uint32_t mods_count = *(uint32_t*)(maddr + 20);
             uint32_t mods_addr = *(uint32_t*)(maddr + 24);
+            uintptr_t mods_virtual_addr = mods_addr + VMM_DIRECT_MAP_OFFSET;
             
             for (uint32_t i = 0; i < mods_count && i < MAX_MODULES; ++i) {
-                Mboot1Module* mod = (Mboot1Module*)(uintptr_t)(mods_addr + i * sizeof(Mboot1Module));
+                Mboot1Module* mod = (Mboot1Module*)(mods_virtual_addr + i * sizeof(Mboot1Module));
                 module_starts[module_count] = mod->mod_start;
                 module_ends[module_count] = mod->mod_end;
                 module_count++;
@@ -235,11 +236,11 @@ uint64_t pmm_alloc_frame() {
     uint64_t frame = free_list_head;
     
     // Pop the frame from the free list
-    free_list_head = *(uint64_t*)frame;
+    free_list_head = *phys_to_virt<uint64_t>(frame);
     free_frames_count--;
 
     // Zero out the frame for security and clean allocations
-    char* bytes = (char*)frame;
+    char* bytes = phys_to_virt<char>(frame);
     for (size_t i = 0; i < 4096; ++i) {
         bytes[i] = 0;
     }
@@ -252,7 +253,7 @@ void pmm_free_frame(uint64_t frame) {
     if (frame & 0xFFFUL) return;
 
     // Push the frame back onto the free list
-    *(uint64_t*)frame = free_list_head;
+    *phys_to_virt<uint64_t>(frame) = free_list_head;
     free_list_head = frame;
     free_frames_count++;
 }
