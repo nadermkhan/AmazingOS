@@ -127,7 +127,7 @@ static void plot_cursor_to_backbuffer(int nx, int ny) {
     int w = drivers::Framebuffer::get_width();
     int h = drivers::Framebuffer::get_height();
 
-    const char* cursor_grid[] = {
+    static const char* const cursor_grid[] = {
         "o                  ",
         "oo                 ",
         "oXo.               ",
