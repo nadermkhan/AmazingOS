@@ -127,25 +127,84 @@ static void plot_cursor_to_backbuffer(int nx, int ny) {
     int w = drivers::Framebuffer::get_width();
     int h = drivers::Framebuffer::get_height();
 
-    auto draw_cursor_pixel = [&](int px, int py, uint32_t color) {
-        if (px >= 0 && px < w && py >= 0 && py < h) {
-            drivers::Framebuffer::draw_pixel(px, py, color);
-        }
+    const char* cursor_grid[] = {
+        "o                  ",
+        "oo                 ",
+        "oXo.               ",
+        "oXXo.              ",
+        "oXXXo.             ",
+        "oXXXXo.            ",
+        "oXXXXXo.           ",
+        "oXXXXXXo.          ",
+        "oXXXXXXXo.         ",
+        "oXXXXXXXXo.        ",
+        "oXXXXXXXXXo.       ",
+        "oXXXXXXXXXXo.      ",
+        "oXXXXXXXXXXXo.     ",
+        "oXXXXXXoooooo.     ",
+        "oXXoXXXo.x         ",
+        "oXo.oXXXo.x        ",
+        "oo. oXXXo.x        ",
+        "o.   oXXXo.x       ",
+        "     oXXXo.x       ",
+        "      oXXXo.x      ",
+        "      oXXXo.x      ",
+        "       oXXo.x      ",
+        "       ooo.x       ",
+        "        ..x        ",
+        "         xx        "
     };
 
-    // White arrow
-    for (int y = 0; y < 12; ++y) {
-        for (int x = 0; x < y + 1; ++x) {
-            draw_cursor_pixel(nx + x, ny + y, C_WHITE);
+    for (int y = 0; y < 25; ++y) {
+        const char* row = cursor_grid[y];
+        for (int x = 0; row[x] != '\0'; ++x) {
+            char c = row[x];
+            if (c == ' ') continue;
+
+            int px = nx + x;
+            int py = ny + y;
+            if (px < 0 || px >= w || py < 0 || py >= h) continue;
+
+            uint32_t color = 0;
+            uint32_t alpha = 0;
+
+            if (c == 'X') {
+                color = 0x00FFFFFF;
+                alpha = 255;
+            } else if (c == 'o') {
+                color = 0x00000000;
+                alpha = 255;
+            } else if (c == '.') {
+                color = 0x00000000;
+                alpha = 90;
+            } else if (c == 'x') {
+                color = 0x00000000;
+                alpha = 40;
+            } else {
+                continue;
+            }
+
+            if (alpha == 255) {
+                drivers::Framebuffer::draw_pixel(px, py, color);
+            } else {
+                // Highly optimized fast integer alpha blending (no floats, no divisions)
+                uint32_t bg = drivers::Framebuffer::get_pixel(px, py);
+                int bg_r = (bg >> 16) & 0xFF;
+                int bg_g = (bg >> 8) & 0xFF;
+                int bg_b = bg & 0xFF;
+
+                int src_r = (color >> 16) & 0xFF;
+                int src_g = (color >> 8) & 0xFF;
+                int src_b = color & 0xFF;
+
+                int out_r = bg_r + (((src_r - bg_r) * (int)alpha) >> 8);
+                int out_g = bg_g + (((src_g - bg_g) * (int)alpha) >> 8);
+                int out_b = bg_b + (((src_b - bg_b) * (int)alpha) >> 8);
+
+                uint32_t blended = ((uint32_t)out_r << 16) | ((uint32_t)out_g << 8) | (uint32_t)out_b;
+                drivers::Framebuffer::draw_pixel(px, py, blended);
+            }
         }
-    }
-    // Black outline
-    for (int y = 0; y < 13; ++y) {
-        draw_cursor_pixel(nx, ny + y, C_BLACK);
-        draw_cursor_pixel(nx + y, ny + y, C_BLACK);
-    }
-    for (int x = 0; x < 13; ++x) {
-        draw_cursor_pixel(nx + x, ny + 12, C_BLACK);
     }
 }
 
@@ -1594,42 +1653,48 @@ void WindowManager::draw_wallpaper() {
 
 void WindowManager::draw_desktop_icons() {
     Rect clip = drivers::Framebuffer::get_clip_rect();
+    int size_bg_w = (int)(64 * ui_scale);
+    int size_bg_h = (int)(80 * ui_scale);
+    int size_ic = (int)(40 * ui_scale);
+    int pad_ic = (int)(12 * ui_scale);
+    int radius_ic = (int)(8 * ui_scale);
+
     for (int i = 0; i < desktop_item_count; i++) {
         DiskItem& it = desktop_items[i];
         if (str_equal(it.path, "Desktop")) {
             // Check if icon bounds (padded for wide labels) overlap active dirty region
-            Rect icon_rect = {it.x - 32, it.y - 10, 128, 90};
+            Rect icon_rect = {it.x - (int)(32 * ui_scale), it.y - (int)(10 * ui_scale), (int)(128 * ui_scale), (int)(90 * ui_scale)};
             if (!clip.intersects(icon_rect)) {
                 continue;
             }
 
             if (it.selected) {
-                drivers::Framebuffer::draw_rounded_rect_alpha(it.x, it.y - 5, 64, 80, 8, 0x0080B0F0, 100);
+                drivers::Framebuffer::draw_rounded_rect_alpha(it.x, it.y - (int)(5 * ui_scale), size_bg_w, size_bg_h, (int)(8 * ui_scale), 0x0080B0F0, 100);
             }
 
             uint32_t icon_c = it.is_directory ? C_FOLDER : (it.is_terminal ? 0x001A1A1A : C_FILE);
             
-            drivers::Framebuffer::draw_rounded_rect_alpha(it.x + 12, it.y, 40, 40, 8, icon_c, 255);
+            drivers::Framebuffer::draw_rounded_rect_alpha(it.x + pad_ic, it.y, size_ic, size_ic, radius_ic, icon_c, 255);
             
             if (it.is_directory) {
                 int lw = get_string_width("F", 15.0f);
-                draw_string("F", it.x + 12 + (40 - lw)/2, it.y + 12, C_WHITE, 15.0f);
+                draw_string("F", it.x + pad_ic + (size_ic - lw)/2, it.y + (int)(12 * ui_scale), C_WHITE, 15.0f);
             } else if (it.is_terminal) {
                 int lw = get_string_width("T", 15.0f);
-                draw_string("T", it.x + 12 + (40 - lw)/2, it.y + 12, 0x004AF02C, 15.0f);
+                draw_string("T", it.x + pad_ic + (size_ic - lw)/2, it.y + (int)(12 * ui_scale), 0x004AF02C, 15.0f);
             }
             
             int label_w = get_string_width(it.name, 13.0f);
-            int label_x = it.x + (64 - label_w) / 2;
-            draw_string(it.name, label_x, it.y + 45, C_WHITE, 13.0f);
+            int label_x = it.x + (size_bg_w - label_w) / 2;
+            draw_string(it.name, label_x, it.y + (int)(45 * ui_scale), C_WHITE, 13.0f);
         }
     }
 }
 
 void WindowManager::arrange_desktop() {
-    int start_x = 30;
-    int start_y = 60;
-    int spacing_y = 90;
+    int start_x = (int)(30 * ui_scale);
+    int start_y = (int)(60 * ui_scale);
+    int spacing_y = (int)(90 * ui_scale);
     int idx = 0;
     for (int i = 0; i < desktop_item_count; i++) {
         if (str_equal(desktop_items[i].path, "Desktop")) {
@@ -1891,18 +1956,8 @@ void WindowManager::draw_mac_decorations() {
 // ---------------------------------------------------------------------------
 // Fix 3 & 4: Unified cursor update guarantee and perfectly bounded rectangle clip
 void WindowManager::redraw_dirty_rect(const Rect& dirty) {
-    int end_x = dirty.x + dirty.w;
-    int y_end = dirty.y + dirty.h;
-
-    Rect scaled_dirty = {
-        scale_dim(dirty.x),
-        scale_dim(dirty.y),
-        scale_dim(end_x) - scale_dim(dirty.x),
-        scale_dim(y_end) - scale_dim(dirty.y)
-    };
-    
-    drivers::Framebuffer::set_clip_rect(scaled_dirty);
-    drivers::Framebuffer::draw_mac_wallpaper(scaled_dirty.x, scaled_dirty.y, scaled_dirty.w, scaled_dirty.h);
+    drivers::Framebuffer::set_clip_rect(dirty);
+    drivers::Framebuffer::draw_mac_wallpaper(dirty.x, dirty.y, dirty.w, dirty.h);
     draw_desktop_icons();
     
     if (is_dragging_selection) {
@@ -1926,7 +1981,7 @@ void WindowManager::redraw_dirty_rect(const Rect& dirty) {
     plot_cursor_to_backbuffer(mouse_x, mouse_y);
     
     drivers::Framebuffer::clear_clip_rect();
-    drivers::Framebuffer::swap_dirty_rect_fast(scaled_dirty);
+    drivers::Framebuffer::swap_dirty_rect_fast(dirty);
 }
 
 // ---------------------------------------------------------------------------
@@ -3150,8 +3205,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
             // 7. Pure cursor move optimization
             int x_min = old_x < mouse_x ? old_x : mouse_x;
             int y_min = old_y < mouse_y ? old_y : mouse_y;
-            int x_max = (old_x + 16 > mouse_x + 16) ? old_x + 16 : mouse_x + 16;
-            int y_max = (old_y + 16 > mouse_y + 16) ? old_y + 16 : mouse_y + 16;
+            int x_max = (old_x + 24 > mouse_x + 24) ? old_x + 24 : mouse_x + 24;
+            int y_max = (old_y + 28 > mouse_y + 28) ? old_y + 28 : mouse_y + 28;
 
             dirty = {x_min, y_min, x_max - x_min, y_max - y_min};
             redraw_dirty_rect(dirty);
