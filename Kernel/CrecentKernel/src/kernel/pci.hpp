@@ -19,6 +19,7 @@ struct PCIDevice {
 
 void pci_init();
 bool pci_find_device(uint16_t vendor_id, uint16_t device_id, PCIDevice& dev);
+bool pci_find_class(uint8_t class_code, uint8_t subclass_code, PCIDevice& dev);
 
 uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
 void pci_write_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value);

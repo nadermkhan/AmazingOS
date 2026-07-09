@@ -154,4 +154,14 @@ bool pci_find_device(uint16_t vendor_id, uint16_t device_id, PCIDevice& dev) {
     return false;
 }
 
+bool pci_find_class(uint8_t class_code, uint8_t subclass_code, PCIDevice& dev) {
+    for (size_t i = 0; i < device_count; i++) {
+        if (devices[i].class_code == class_code && devices[i].subclass_code == subclass_code) {
+            dev = devices[i];
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace kernel

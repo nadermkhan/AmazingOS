@@ -4,6 +4,7 @@
 #include "../drivers/apic.hpp"
 #include "scheduler.hpp"
 #include "../drivers/ps2.hpp"
+#include "vmm.hpp"
 
 // Table of 256 handler pointers generated in assembly
 extern "C" void* isr_stub_table[256];
@@ -164,6 +165,8 @@ extern "C" __attribute__((sysv_abi)) void interrupt_handler(InterruptFrame* fram
             drivers::Serial::print("Faulting Virtual Address (CR2): ");
             serial_print_hex(cr2_val);
             drivers::Serial::println("");
+
+            kernel::vmm_dump_page_table_details(cr2_val);
         }
 
         dump_registers(frame);

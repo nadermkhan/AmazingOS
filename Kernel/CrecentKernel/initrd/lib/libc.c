@@ -3,6 +3,21 @@
 // Dummy function to satisfy MinGW compiler initialization call
 void __main() {}
 
+// Global entry point stub to parse stack arguments and jump to main
+__asm__ (
+    ".global _start\n"
+    "_start:\n"
+    "    popq %rdi\n"             // SysV: argc
+    "    movq %rdi, %rcx\n"       // Win64: argc
+    "    movq %rsp, %rsi\n"       // SysV: argv
+    "    movq %rsp, %rdx\n"       // Win64: argv
+    "    andq $-16, %rsp\n"       // 16-byte stack alignment
+    "    subq $32, %rsp\n"        // 32-byte Win64 shadow space
+    "    call main\n"             // Execute application main()
+    "    movq %rax, %rdi\n"       // Exit status in RDI
+    "    call exit\n"             // Terminate process
+);
+
 static inline long long syscall3(long long num, long long a1, long long a2, long long a3) {
     long long ret;
     register long long rdi_val __asm__("rdi") = a1;

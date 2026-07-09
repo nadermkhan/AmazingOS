@@ -16,6 +16,9 @@
 #include "../drivers/ttf.hpp"
 #include "pci.hpp"
 #include "../drivers/e1000.hpp"
+#include "../drivers/ahci.hpp"
+#include "../fs/partition.hpp"
+#include "../fs/exfat.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -598,6 +601,12 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         }
     }
 
+    // Separate Direct Physical Map page tables from identity map ASAP after PMM
+    // This must happen before any kmalloc/kfree to prevent aliasing bugs
+    if (pmm_ok) {
+        kernel::vmm_separate_dpm();
+    }
+
     // 7. Initialize Slab Heap Allocator
     bool heap_ok = kernel::heap_init();
     if (serial_ok) {
@@ -716,6 +725,29 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         } else {
             if (serial_ok) {
                 drivers::Serial::println("[TarFS] Error: No Multiboot modules found!");
+            }
+        }
+    }
+    // Initialize SATA AHCI controller and mount exFAT partition
+    {
+        if (drivers::Ahci::init()) {
+            uint64_t exfat_lba = fs::Partition::find_exfat_partition();
+            if (fs::Exfat::init(exfat_lba)) {
+                fs::VFS::register_mount("/disk", fs::Exfat::get_root_node());
+                drivers::Vga::println("[exFAT] Disk mounted successfully at '/disk'");
+                if (serial_ok) {
+                    drivers::Serial::println("[exFAT] Disk mounted successfully at '/disk'");
+                }
+            } else {
+                drivers::Vga::println("[exFAT] Error: Failed to initialize exFAT filesystem!");
+                if (serial_ok) {
+                    drivers::Serial::println("[exFAT] Error: Failed to initialize exFAT filesystem!");
+                }
+            }
+        } else {
+            drivers::Vga::println("[AHCI] SATA disk controller not present.");
+            if (serial_ok) {
+                drivers::Serial::println("[AHCI] SATA disk controller not present.");
             }
         }
     }

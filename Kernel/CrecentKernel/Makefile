@@ -17,7 +17,7 @@ TARGET_PE = kernel.exe
 TARGET_ELF = kernel.bin
 
 # Object files mapping
-OBJS = boot.o main.o vga.o serial.o vfs.o gdt.o idt.o apic.o interrupts.o pmm.o vmm.o heap.o switch.o scheduler.o tarfs.o syscall.o syscall_asm.o framebuffer.o wm.o ps2.o libstub.o ttf.o elf.o pci.o e1000.o
+OBJS = boot.o main.o vga.o serial.o vfs.o gdt.o idt.o apic.o interrupts.o pmm.o vmm.o heap.o switch.o scheduler.o tarfs.o syscall.o syscall_asm.o framebuffer.o wm.o ps2.o libstub.o ttf.o elf.o pci.o e1000.o ahci.o partition.o exfat.o
 
 .PHONY: all clean qemu
 
@@ -111,6 +111,15 @@ pci.o: src/kernel/pci.cpp
 
 e1000.o: src/drivers/e1000.cpp
 	$(CXX) $(CXXFLAGS) -c src/drivers/e1000.cpp -o e1000.o
+
+ahci.o: src/drivers/ahci.cpp
+	$(CXX) $(CXXFLAGS) -c src/drivers/ahci.cpp -o ahci.o
+
+partition.o: src/fs/partition.cpp
+	$(CXX) $(CXXFLAGS) -c src/fs/partition.cpp -o partition.o
+
+exfat.o: src/fs/exfat.cpp
+	$(CXX) $(CXXFLAGS) -c src/fs/exfat.cpp -o exfat.o
 
 # Clean up build artifacts
 clean:

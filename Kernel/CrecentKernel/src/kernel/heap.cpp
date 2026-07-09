@@ -34,8 +34,9 @@ static KmemCache caches[] = {
 constexpr size_t NUM_CACHES = sizeof(caches) / sizeof(caches[0]);
 
 // Virtual address space tracking pointer for large allocations
-// Starts at 8GB to stay clear of the lower 4GB identity mapping window
-static uint64_t next_large_virt = 0x200000000ULL;
+// Starts at 4GB offset in the Direct Physical Map (0xFFFF800100000000)
+// to utilize the shared kernel PDPT (PML4[256]) and prevent stack/heap page divergence.
+static uint64_t next_large_virt = 0xFFFF800100000000ULL;
 
 bool heap_init() {
     drivers::Serial::println("[INIT] Slab Heap Allocator initialized.");

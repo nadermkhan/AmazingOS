@@ -21,6 +21,10 @@ constexpr uint64_t VMM_FLAG_NO_EXECUTE  = 1ULL << 63;
 // Initialize the Virtual Memory Manager (reads CR3 register)
 void vmm_init();
 
+// Separate PML4[256] (Direct Physical Map) from PML4[0] (identity map)
+// Must be called after PMM is initialized to allocate a dedicated PDPT page
+void vmm_separate_dpm();
+
 // Map a 4KB virtual page to a physical frame
 // virt: Virtual address (4KB aligned)
 // phys: Physical address (4KB aligned)
@@ -52,5 +56,8 @@ bool vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint
 
 // Clone user space address mappings from parent to child PML4
 void vmm_clone_user_space(uint64_t parent_pml4, uint64_t child_pml4);
+
+// Dump page table entries and structure details for a given virtual address
+void vmm_dump_page_table_details(uint64_t virt);
 
 } // namespace kernel

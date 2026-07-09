@@ -542,7 +542,7 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
 
             int client_w = win->rect.w - 2;
             int client_h = win->rect.h - 42;
-            size_t size_bytes = client_w * client_h * sizeof(uint32_t);
+            size_t size_bytes = client_w * client_h * 4;
 
             if (!syscall_validate_buffer(user_buf, size_bytes)) {
                 drivers::Serial::println("[SYSCALL] Security violation: sys_update_window passed invalid user buffer pointer!");
@@ -1006,6 +1006,18 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
                 break;
             }
 
+            drivers::Serial::print("[sys_execve] Loaded entry point: 0x");
+            {
+                const char* hex = "0123456789ABCDEF";
+                for (int h = 7; h >= 0; h--) {
+                    char c[2] = { hex[(entry_point >> (h * 8 + 4)) & 0xF], '\0' };
+                    drivers::Serial::print(c);
+                    c[0] = hex[(entry_point >> (h * 8)) & 0xF];
+                    drivers::Serial::print(c);
+                }
+            }
+            drivers::Serial::println("");
+
             // Lock interrupts to prevent scheduler preemption on active PML4 updates
             uint64_t rflags;
             __asm__ __volatile__ ("pushfq; popq %0; cli" : "=r"(rflags));
@@ -1061,8 +1073,10 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
 
             frame->rip = entry_point;
             frame->rsp = final_rsp;
-            frame->rdi = argc;
-            frame->rsi = argv_address;
+            frame->rdi = argc;          // System V ABI: argc
+            frame->rsi = argv_address;  // System V ABI: argv
+            frame->rcx = argc;          // Windows x64 ABI: argc
+            frame->rdx = argv_address;  // Windows x64 ABI: argv
             frame->rax = 0;
             break;
         }

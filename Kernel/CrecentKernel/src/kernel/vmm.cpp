@@ -1,5 +1,6 @@
 #include "vmm.hpp"
 #include "pmm.hpp"
+#include "../drivers/serial.hpp"
 
 namespace kernel {
 
@@ -16,6 +17,41 @@ void vmm_init() {
 
     // Set USER privilege flag on PML4 entry 0 to allow Ring 3 privilege resolution under 512GB
     phys_to_virt<uint64_t>(active_pml4)[0] |= VMM_FLAG_USER;
+}
+
+void vmm_separate_dpm() {
+    // CRITICAL FIX: Separate PML4[256] (Direct Physical Map at 0xFFFF800000000000)
+    // from PML4[0] (identity map). The boot code made both point to the SAME PDPT
+    // page, which causes vmm_unmap_page on PML4[0] addresses (e.g. 0x100000000)
+    // to also unmap the corresponding pages in the Direct Physical Map
+    // (e.g. 0xFFFF800100000000). This broke the framebuffer back_buffer.
+    uint64_t* pml4 = phys_to_virt<uint64_t>(active_pml4);
+    uint64_t old_pdpt_phys = pml4[256] & VMM_PHYS_ADDR_MASK;
+    
+    if (old_pdpt_phys != 0 && old_pdpt_phys == (pml4[0] & VMM_PHYS_ADDR_MASK)) {
+        // PML4[0] and PML4[256] share the same PDPT - separate them
+        uint64_t new_pdpt_phys = pmm_alloc_frame();
+        if (new_pdpt_phys) {
+            uint64_t* old_pdpt = phys_to_virt<uint64_t>(old_pdpt_phys);
+            uint64_t* new_pdpt = phys_to_virt<uint64_t>(new_pdpt_phys);
+            
+            // Copy all 512 PDPT entries from the shared boot PDPT
+            for (int i = 0; i < 512; i++) {
+                new_pdpt[i] = old_pdpt[i];
+            }
+            
+            // Point PML4[256] to the new independent PDPT
+            uint64_t old_flags = pml4[256] & 0xFFFULL;
+            pml4[256] = new_pdpt_phys | old_flags;
+            
+            // Flush entire TLB to apply the new mapping
+            uint64_t cr3_val;
+            __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(cr3_val));
+            __asm__ __volatile__ ("mov %0, %%cr3" : : "r"(cr3_val) : "memory");
+            
+            drivers::Serial::println("[VMM] Separated PML4[256] PDPT from PML4[0] (Direct Physical Map isolated).");
+        }
+    }
 }
 
 bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -300,6 +336,122 @@ void vmm_clone_user_space(uint64_t parent_pml4, uint64_t child_pml4) {
                 }
             }
         }
+    }
+}
+
+void vmm_dump_page_table_details(uint64_t virt) {
+    auto print_hex = [](uint64_t val) {
+        const char* hex = "0123456789ABCDEF";
+        for (int i = 15; i >= 0; i--) {
+            char c[2] = { hex[(val >> (i * 4)) & 0xF], '\0' };
+            drivers::Serial::print(c);
+        }
+    };
+
+    uint64_t cr3_val;
+    __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(cr3_val));
+    cr3_val &= VMM_PHYS_ADDR_MASK;
+
+    size_t pml4_idx = (virt >> 39) & 0x1FF;
+    size_t pdpt_idx = (virt >> 30) & 0x1FF;
+    size_t pd_idx   = (virt >> 21) & 0x1FF;
+    size_t pt_idx   = (virt >> 12) & 0x1FF;
+
+    drivers::Serial::println("--- VMM Page Table Walk ---");
+    drivers::Serial::print("Target Virt Address: 0x");
+    print_hex(virt);
+    drivers::Serial::print("  CR3 (PML4 Phys): 0x");
+    print_hex(cr3_val);
+    drivers::Serial::println("");
+
+    uint64_t* pml4 = phys_to_virt<uint64_t>(cr3_val);
+    uint64_t pml4e = pml4[pml4_idx];
+    drivers::Serial::print("PML4[");
+    print_hex(pml4_idx);
+    drivers::Serial::print("]: 0x");
+    print_hex(pml4e);
+    drivers::Serial::println("");
+
+    if (!(pml4e & VMM_FLAG_PRESENT)) {
+        drivers::Serial::println("PML4 entry is NOT present. Stopping walk.");
+        return;
+    }
+
+    uint64_t* pdpt = phys_to_virt<uint64_t>(pml4e & VMM_PHYS_ADDR_MASK);
+    uint64_t pdpte = pdpt[pdpt_idx];
+    drivers::Serial::print("PDPT[");
+    print_hex(pdpt_idx);
+    drivers::Serial::print("]: 0x");
+    print_hex(pdpte);
+    drivers::Serial::println("");
+
+    if (!(pdpte & VMM_FLAG_PRESENT)) {
+        drivers::Serial::println("PDPT entry is NOT present. Stopping walk.");
+        return;
+    }
+    if (pdpte & VMM_FLAG_HUGE) {
+        drivers::Serial::println("Huge 1GB Page detected. Stopping walk.");
+        return;
+    }
+
+    uint64_t* pd = phys_to_virt<uint64_t>(pdpte & VMM_PHYS_ADDR_MASK);
+    uint64_t pde = pd[pd_idx];
+    drivers::Serial::print("PD[");
+    print_hex(pd_idx);
+    drivers::Serial::print("]: 0x");
+    print_hex(pde);
+    drivers::Serial::println("");
+
+    if (!(pde & VMM_FLAG_PRESENT)) {
+        drivers::Serial::println("PD entry is NOT present. Stopping walk.");
+        return;
+    }
+    if (pde & VMM_FLAG_HUGE) {
+        drivers::Serial::println("Huge 2MB Page detected. Stopping walk.");
+        return;
+    }
+
+    uint64_t* pt = phys_to_virt<uint64_t>(pde & VMM_PHYS_ADDR_MASK);
+    uint64_t pte = pt[pt_idx];
+    drivers::Serial::print("PT[");
+    print_hex(pt_idx);
+    drivers::Serial::print("]: 0x");
+    print_hex(pte);
+    drivers::Serial::println("");
+
+    // Dump first 10 entries of this PT page
+    drivers::Serial::println("First 10 entries of this PT page:");
+    for (int i = 0; i < 10; ++i) {
+        drivers::Serial::print("  PT[");
+        print_hex(i);
+        drivers::Serial::print("]: 0x");
+        print_hex(pt[i]);
+        drivers::Serial::println("");
+    }
+
+    // Count non-zeros in the entire PT page
+    int nz_count = 0;
+    for (int i = 0; i < 512; ++i) {
+        if (pt[i] != 0) nz_count++;
+    }
+    drivers::Serial::print("Total non-zero entries in this PT page: ");
+    char count_str[16];
+    int c_idx = 0;
+    int temp_c = nz_count;
+    if (temp_c == 0) count_str[c_idx++] = '0';
+    else {
+        char rev_c[16];
+        int r_c = 0;
+        while (temp_c > 0) { rev_c[r_c++] = '0' + (temp_c % 10); temp_c /= 10; }
+        while (r_c > 0) count_str[c_idx++] = rev_c[--r_c];
+    }
+    count_str[c_idx] = '\0';
+    drivers::Serial::println(count_str);
+
+    if (!(pte & VMM_FLAG_PRESENT)) {
+        drivers::Serial::println("PT entry (Page) is NOT present.");
+    } else {
+        drivers::Serial::println("Page is mapped and PRESENT!");
     }
 }
 
