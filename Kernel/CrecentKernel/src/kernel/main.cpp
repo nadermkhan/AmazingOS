@@ -14,6 +14,8 @@
 #include "wm.hpp"
 #include "../drivers/ps2.hpp"
 #include "../drivers/ttf.hpp"
+#include "pci.hpp"
+#include "../drivers/e1000.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -605,6 +607,12 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
             drivers::Serial::println("[ERROR] Slab Heap Allocator failed!");
         }
     }
+
+    // Initialize PCI Bus Scanner
+    kernel::pci_init();
+
+    // Initialize Intel e1000 network driver
+    drivers::e1000_init();
 
     // Initialize Graphical Framebuffer if VBE graphics requested and supplied by bootloader
     if (heap_ok) {

@@ -8,6 +8,7 @@
 #include "wm.hpp"
 #include "../drivers/ttf.hpp"
 #include "elf.hpp"
+#include "../drivers/e1000.hpp"
 
 extern "C" {
     uint64_t user_rsp_temp = 0;
@@ -34,6 +35,342 @@ struct SharedMemSegment {
 };
 
 static SharedMemSegment shm_segments[16];
+
+// --- POSIX Networking Support ---
+
+static inline uint16_t htons(uint16_t val) {
+    return (uint16_t)((val << 8) | (val >> 8));
+}
+static inline uint16_t ntohs(uint16_t val) {
+    return htons(val);
+}
+static inline uint32_t htonl(uint32_t val) {
+    return ((val & 0xFF) << 24) | ((val & 0xFF00) << 8) | ((val & 0xFF0000) >> 8) | (val >> 24);
+}
+static inline uint32_t ntohl(uint32_t val) {
+    return htonl(val);
+}
+
+struct EthernetHeader {
+    uint8_t dest_mac[6];
+    uint8_t src_mac[6];
+    uint16_t ethertype;
+} __attribute__((packed));
+
+struct IPv4Header {
+    uint8_t ver_ihl;
+    uint8_t tos;
+    uint16_t total_length;
+    uint16_t id;
+    uint16_t flags_fragment;
+    uint8_t ttl;
+    uint8_t protocol;
+    uint16_t checksum;
+    uint32_t src_ip;
+    uint32_t dest_ip;
+} __attribute__((packed));
+
+struct TCPHeader {
+    uint16_t src_port;
+    uint16_t dest_port;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t data_offset;
+    uint8_t flags;
+    uint16_t window;
+    uint16_t checksum;
+    uint16_t urgent;
+} __attribute__((packed));
+
+struct TCPPseudoHeader {
+    uint32_t src_ip;
+    uint32_t dest_ip;
+    uint8_t reserved;
+    uint8_t protocol;
+    uint16_t tcp_length;
+} __attribute__((packed));
+
+struct ARPHeader {
+    uint16_t htype;
+    uint16_t ptype;
+    uint8_t hlen;
+    uint8_t plen;
+    uint16_t op;
+    uint8_t src_mac[6];
+    uint32_t src_ip;
+    uint8_t dest_mac[6];
+    uint32_t dest_ip;
+} __attribute__((packed));
+
+static uint16_t ip_checksum(void* addr, int count) {
+    uint32_t sum = 0;
+    uint8_t* ptr = (uint8_t*)addr;
+    for (int i = 0; i < count - 1; i += 2) {
+        sum += ((uint32_t)ptr[i] << 8) + ptr[i+1];
+    }
+    if (count & 1) {
+        sum += (uint32_t)ptr[count - 1] << 8;
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    uint16_t checksum = (uint16_t)~sum;
+    return htons(checksum);
+}
+
+static uint16_t tcp_checksum(uint32_t src_ip, uint32_t dest_ip, void* tcp_seg, int tcp_len) {
+    uint32_t sum = 0;
+    
+    uint16_t* src_ptr = (uint16_t*)&src_ip;
+    sum += ntohs(src_ptr[0]);
+    sum += ntohs(src_ptr[1]);
+    
+    uint16_t* dest_ptr = (uint16_t*)&dest_ip;
+    sum += ntohs(dest_ptr[0]);
+    sum += ntohs(dest_ptr[1]);
+    
+    sum += 6; // protocol
+    sum += tcp_len; // length
+    
+    uint8_t* ptr = (uint8_t*)tcp_seg;
+    for (int i = 0; i < tcp_len - 1; i += 2) {
+        sum += ((uint32_t)ptr[i] << 8) + ptr[i+1];
+    }
+    if (tcp_len & 1) {
+        sum += (uint32_t)ptr[tcp_len - 1] << 8;
+    }
+    
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    
+    uint16_t checksum = (uint16_t)~sum;
+    return htons(checksum);
+}
+
+enum SocketState {
+    SOCKET_CLOSED,
+    SOCKET_SYN_SENT,
+    SOCKET_ESTABLISHED,
+    SOCKET_FIN_WAIT
+};
+
+struct Socket {
+    bool active;
+    SocketState state;
+    uint32_t dest_ip;
+    uint16_t dest_port;
+    uint16_t src_port;
+    uint32_t my_seq;
+    uint32_t my_ack;
+    char rx_buffer[8192];
+    size_t rx_len;
+};
+
+static Socket sockets[16];
+
+static void pci_poll_network() {
+    alignas(16) char packet[2048];
+    uint16_t len;
+    while ((len = drivers::e1000_recv_packet(packet, sizeof(packet))) > 0) {
+        if (len < sizeof(EthernetHeader)) continue;
+        
+        EthernetHeader* eth = (EthernetHeader*)packet;
+        uint16_t ethertype = ntohs(eth->ethertype);
+        
+        if (ethertype == 0x0806) {
+            if (len < sizeof(EthernetHeader) + sizeof(ARPHeader)) continue;
+            ARPHeader* arp = (ARPHeader*)(packet + sizeof(EthernetHeader));
+            if (ntohs(arp->op) == 1 && arp->dest_ip == 0x0F02000A) {
+                alignas(16) char reply_pkt[128];
+                EthernetHeader* out_eth = (EthernetHeader*)reply_pkt;
+                for (int i = 0; i < 6; i++) {
+                    out_eth->dest_mac[i] = eth->src_mac[i];
+                    out_eth->src_mac[i] = eth->dest_mac[i];
+                }
+                out_eth->ethertype = htons(0x0806);
+                
+                ARPHeader* out_arp = (ARPHeader*)(reply_pkt + sizeof(EthernetHeader));
+                out_arp->htype = htons(1);
+                out_arp->ptype = htons(0x0800);
+                out_arp->hlen = 6;
+                out_arp->plen = 4;
+                out_arp->op = htons(2);
+                
+                for (int i = 0; i < 6; i++) {
+                    out_arp->src_mac[i] = eth->dest_mac[i];
+                    out_arp->dest_mac[i] = arp->src_mac[i];
+                }
+                out_arp->src_ip = 0x0F02000A;
+                out_arp->dest_ip = arp->src_ip;
+                
+                drivers::e1000_send_packet(reply_pkt, sizeof(EthernetHeader) + sizeof(ARPHeader));
+            }
+            continue;
+        }
+        
+        if (ethertype != 0x0800) continue;
+        if (len < sizeof(EthernetHeader) + sizeof(IPv4Header)) continue;
+        
+        IPv4Header* ip = (IPv4Header*)(packet + sizeof(EthernetHeader));
+        if (ip->protocol != 6) continue;
+        
+        int ip_header_len = (ip->ver_ihl & 0x0F) * 4;
+        TCPHeader* tcp = (TCPHeader*)(packet + sizeof(EthernetHeader) + ip_header_len);
+        
+        int sock_idx = -1;
+        for (int i = 0; i < 16; i++) {
+            if (sockets[i].active && 
+                sockets[i].dest_ip == ip->src_ip && 
+                sockets[i].dest_port == ntohs(tcp->src_port) && 
+                sockets[i].src_port == ntohs(tcp->dest_port)) {
+                sock_idx = i;
+                break;
+            }
+        }
+        
+        if (sock_idx == -1) continue;
+        Socket& sock = sockets[sock_idx];
+        
+        uint32_t incoming_seq = ntohl(tcp->seq);
+        uint32_t incoming_ack = ntohl(tcp->ack);
+        uint16_t tcp_header_len = (tcp->data_offset >> 4) * 4;
+        uint16_t ip_total_len = ntohs(ip->total_length);
+        uint16_t payload_len = ip_total_len - ip_header_len - tcp_header_len;
+        
+        if (sock.state == SOCKET_SYN_SENT && (tcp->flags & 0x12) == 0x12) {
+            sock.my_ack = incoming_seq + 1;
+            sock.my_seq = incoming_ack;
+            sock.state = SOCKET_ESTABLISHED;
+            
+            char ack_pkt[128];
+            EthernetHeader* out_eth = (EthernetHeader*)ack_pkt;
+            for (int i = 0; i < 6; i++) {
+                out_eth->dest_mac[i] = eth->src_mac[i];
+                out_eth->src_mac[i] = eth->dest_mac[i];
+            }
+            out_eth->ethertype = htons(0x0800);
+            
+            IPv4Header* out_ip = (IPv4Header*)(ack_pkt + sizeof(EthernetHeader));
+            out_ip->ver_ihl = 0x45;
+            out_ip->tos = 0;
+            out_ip->total_length = htons(40);
+            out_ip->id = htons(1);
+            out_ip->flags_fragment = 0;
+            out_ip->ttl = 64;
+            out_ip->protocol = 6;
+            out_ip->checksum = 0;
+            out_ip->src_ip = ip->dest_ip;
+            out_ip->dest_ip = ip->src_ip;
+            out_ip->checksum = ip_checksum(out_ip, 20);
+            
+            TCPHeader* out_tcp = (TCPHeader*)(ack_pkt + sizeof(EthernetHeader) + 20);
+            out_tcp->src_port = tcp->dest_port;
+            out_tcp->dest_port = tcp->src_port;
+            out_tcp->seq = htonl(sock.my_seq);
+            out_tcp->ack = htonl(sock.my_ack);
+            out_tcp->data_offset = (5 << 4);
+            out_tcp->flags = 0x10;
+            out_tcp->window = htons(4096);
+            out_tcp->checksum = 0;
+            out_tcp->urgent = 0;
+            out_tcp->checksum = tcp_checksum(out_ip->src_ip, out_ip->dest_ip, out_tcp, 20);
+            
+            drivers::e1000_send_packet(ack_pkt, sizeof(EthernetHeader) + 40);
+        }
+        else if (sock.state == SOCKET_ESTABLISHED) {
+            if (payload_len > 0) {
+                if (incoming_seq == sock.my_ack) {
+                    if (sock.rx_len + payload_len < sizeof(sock.rx_buffer)) {
+                        char* payload = (char*)tcp + tcp_header_len;
+                        for (uint16_t i = 0; i < payload_len; i++) {
+                            sock.rx_buffer[sock.rx_len + i] = payload[i];
+                        }
+                        sock.rx_len += payload_len;
+                        sock.my_ack += payload_len;
+                    }
+                    
+                    char ack_pkt[128];
+                    EthernetHeader* out_eth = (EthernetHeader*)ack_pkt;
+                    for (int i = 0; i < 6; i++) {
+                        out_eth->dest_mac[i] = eth->src_mac[i];
+                        out_eth->src_mac[i] = eth->dest_mac[i];
+                    }
+                    out_eth->ethertype = htons(0x0800);
+                    
+                    IPv4Header* out_ip = (IPv4Header*)(ack_pkt + sizeof(EthernetHeader));
+                    out_ip->ver_ihl = 0x45;
+                    out_ip->tos = 0;
+                    out_ip->total_length = htons(40);
+                    out_ip->id = htons(1);
+                    out_ip->flags_fragment = 0;
+                    out_ip->ttl = 64;
+                    out_ip->protocol = 6;
+                    out_ip->checksum = 0;
+                    out_ip->src_ip = ip->dest_ip;
+                    out_ip->dest_ip = ip->src_ip;
+                    out_ip->checksum = ip_checksum(out_ip, 20);
+                    
+                    TCPHeader* out_tcp = (TCPHeader*)(ack_pkt + sizeof(EthernetHeader) + 20);
+                    out_tcp->src_port = tcp->dest_port;
+                    out_tcp->dest_port = tcp->src_port;
+                    out_tcp->seq = htonl(sock.my_seq);
+                    out_tcp->ack = htonl(sock.my_ack);
+                    out_tcp->data_offset = (5 << 4);
+                    out_tcp->flags = 0x10;
+                    out_tcp->window = htons(4096);
+                    out_tcp->checksum = 0;
+                    out_tcp->urgent = 0;
+                    out_tcp->checksum = tcp_checksum(out_ip->src_ip, out_ip->dest_ip, out_tcp, 20);
+                    
+                    drivers::e1000_send_packet(ack_pkt, sizeof(EthernetHeader) + 40);
+                }
+            }
+            
+            if (tcp->flags & 0x01) {
+                sock.my_ack = incoming_seq + 1;
+                sock.state = SOCKET_CLOSED;
+                
+                char ack_pkt[128];
+                EthernetHeader* out_eth = (EthernetHeader*)ack_pkt;
+                for (int i = 0; i < 6; i++) {
+                    out_eth->dest_mac[i] = eth->src_mac[i];
+                    out_eth->src_mac[i] = eth->dest_mac[i];
+                }
+                out_eth->ethertype = htons(0x0800);
+                
+                IPv4Header* out_ip = (IPv4Header*)(ack_pkt + sizeof(EthernetHeader));
+                out_ip->ver_ihl = 0x45;
+                out_ip->tos = 0;
+                out_ip->total_length = htons(40);
+                out_ip->id = htons(1);
+                out_ip->flags_fragment = 0;
+                out_ip->ttl = 64;
+                out_ip->protocol = 6;
+                out_ip->checksum = 0;
+                out_ip->src_ip = ip->dest_ip;
+                out_ip->dest_ip = ip->src_ip;
+                out_ip->checksum = ip_checksum(out_ip, 20);
+                
+                TCPHeader* out_tcp = (TCPHeader*)(ack_pkt + sizeof(EthernetHeader) + 20);
+                out_tcp->src_port = tcp->dest_port;
+                out_tcp->dest_port = tcp->src_port;
+                out_tcp->seq = htonl(sock.my_seq);
+                out_tcp->ack = htonl(sock.my_ack);
+                out_tcp->data_offset = (5 << 4);
+                out_tcp->flags = 0x11;
+                out_tcp->window = htons(4096);
+                out_tcp->checksum = 0;
+                out_tcp->urgent = 0;
+                out_tcp->checksum = tcp_checksum(out_ip->src_ip, out_ip->dest_ip, out_tcp, 20);
+                
+                drivers::e1000_send_packet(ack_pkt, sizeof(EthernetHeader) + 40);
+            }
+        }
+    }
+}
+
+// ---------------------------------
 
 // MSR register offsets
 constexpr uint32_t MSR_EFER   = 0xC0000080;
@@ -834,6 +1171,225 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             __asm__ __volatile__ ("pushq %0; popfq" : : "r"(rflags));
 
             frame->rax = ok ? 0 : (uint64_t)-1;
+            break;
+        }
+
+        case 16: { // sys_socket
+            int domain = (int)frame->rdi;
+            int type = (int)frame->rsi;
+            int protocol = (int)frame->rdx;
+            (void)domain; (void)type; (void)protocol;
+
+            int sock_idx = -1;
+            for (int i = 0; i < 16; i++) {
+                if (!sockets[i].active) {
+                    sock_idx = i;
+                    break;
+                }
+            }
+
+            if (sock_idx != -1) {
+                sockets[sock_idx].active = true;
+                sockets[sock_idx].state = SOCKET_CLOSED;
+                sockets[sock_idx].rx_len = 0;
+                frame->rax = (uint64_t)(100 + sock_idx);
+            } else {
+                frame->rax = (uint64_t)-1;
+            }
+            break;
+        }
+
+        case 17: { // sys_connect
+            int sockfd = (int)frame->rdi;
+            uint64_t addr_ptr = frame->rsi;
+            uint32_t addrlen = (uint32_t)frame->rdx;
+            (void)addrlen;
+
+            int sock_idx = sockfd - 100;
+            if (sock_idx < 0 || sock_idx >= 16 || !sockets[sock_idx].active) {
+                frame->rax = (uint64_t)-9; // EBADF
+                break;
+            }
+
+            struct sockaddr_in {
+                uint16_t sin_family;
+                uint16_t sin_port;
+                uint32_t sin_addr;
+                char sin_zero[8];
+            }* addr = (struct sockaddr_in*)addr_ptr;
+
+            if (!syscall_validate_buffer(addr, sizeof(struct sockaddr_in))) {
+                frame->rax = (uint64_t)-14; // EFAULT
+                break;
+            }
+
+            Socket& sock = sockets[sock_idx];
+            sock.dest_ip = addr->sin_addr;
+            sock.dest_port = ntohs(addr->sin_port);
+            sock.src_port = 50000 + sock_idx;
+            sock.my_seq = 1000;
+            sock.my_ack = 0;
+            sock.state = SOCKET_SYN_SENT;
+            sock.rx_len = 0;
+
+            // Construct and send TCP SYN packet
+            alignas(16) char syn_pkt[128];
+            EthernetHeader* eth = (EthernetHeader*)syn_pkt;
+            eth->dest_mac[0] = 0x52; eth->dest_mac[1] = 0x54; eth->dest_mac[2] = 0x00;
+            eth->dest_mac[3] = 0x12; eth->dest_mac[4] = 0x35; eth->dest_mac[5] = 0x02;
+            eth->src_mac[0] = 0x52; eth->src_mac[1] = 0x54; eth->src_mac[2] = 0x00;
+            eth->src_mac[3] = 0x12; eth->src_mac[4] = 0x34; eth->src_mac[5] = 0x56;
+            eth->ethertype = htons(0x0800);
+
+            IPv4Header* ip = (IPv4Header*)(syn_pkt + sizeof(EthernetHeader));
+            ip->ver_ihl = 0x45;
+            ip->tos = 0;
+            ip->total_length = htons(40);
+            ip->id = htons(1);
+            ip->flags_fragment = 0;
+            ip->ttl = 64;
+            ip->protocol = 6;
+            ip->checksum = 0;
+            ip->src_ip = 0x0F02000A; // 10.0.2.15 (big-endian 0x0F02000A)
+            ip->dest_ip = sock.dest_ip;
+            ip->checksum = ip_checksum(ip, 20);
+
+            TCPHeader* tcp = (TCPHeader*)(syn_pkt + sizeof(EthernetHeader) + 20);
+            tcp->src_port = htons(sock.src_port);
+            tcp->dest_port = htons(sock.dest_port);
+            tcp->seq = htonl(sock.my_seq);
+            tcp->ack = 0;
+            tcp->data_offset = (5 << 4);
+            tcp->flags = 0x02; // SYN
+            tcp->window = htons(4096);
+            tcp->checksum = 0;
+            tcp->urgent = 0;
+            tcp->checksum = tcp_checksum(ip->src_ip, ip->dest_ip, tcp, 20);
+
+            drivers::e1000_send_packet(syn_pkt, sizeof(EthernetHeader) + 40);
+
+            // Poll for SYN-ACK
+            int timeout = 50000000;
+            while (sock.state == SOCKET_SYN_SENT && timeout > 0) {
+                pci_poll_network();
+                timeout--;
+            }
+
+            if (sock.state == SOCKET_ESTABLISHED) {
+                frame->rax = 0;
+            } else {
+                frame->rax = (uint64_t)-110; // ETIMEDOUT
+            }
+            break;
+        }
+
+        case 18: { // sys_send
+            int sockfd = (int)frame->rdi;
+            const void* buf = (const void*)frame->rsi;
+            size_t len = (size_t)frame->rdx;
+            int flags = (int)frame->r10;
+            (void)flags;
+
+            int sock_idx = sockfd - 100;
+            if (sock_idx < 0 || sock_idx >= 16 || !sockets[sock_idx].active || sockets[sock_idx].state != SOCKET_ESTABLISHED) {
+                frame->rax = (uint64_t)-9; // EBADF
+                break;
+            }
+
+            if (!syscall_validate_buffer(buf, len)) {
+                frame->rax = (uint64_t)-14; // EFAULT
+                break;
+            }
+
+            Socket& sock = sockets[sock_idx];
+            alignas(16) char pkt[2048];
+            EthernetHeader* eth = (EthernetHeader*)pkt;
+            eth->dest_mac[0] = 0x52; eth->dest_mac[1] = 0x54; eth->dest_mac[2] = 0x00;
+            eth->dest_mac[3] = 0x12; eth->dest_mac[4] = 0x35; eth->dest_mac[5] = 0x02;
+            eth->src_mac[0] = 0x52; eth->src_mac[1] = 0x54; eth->src_mac[2] = 0x00;
+            eth->src_mac[3] = 0x12; eth->src_mac[4] = 0x34; eth->src_mac[5] = 0x56;
+            eth->ethertype = htons(0x0800);
+
+            IPv4Header* ip = (IPv4Header*)(pkt + sizeof(EthernetHeader));
+            ip->ver_ihl = 0x45;
+            ip->tos = 0;
+            ip->total_length = htons(40 + len);
+            ip->id = htons(2);
+            ip->flags_fragment = 0;
+            ip->ttl = 64;
+            ip->protocol = 6;
+            ip->checksum = 0;
+            ip->src_ip = 0x0F02000A; // 10.0.2.15 (big-endian 0x0F02000A)
+            ip->dest_ip = sock.dest_ip;
+            ip->checksum = ip_checksum(ip, 20);
+
+            TCPHeader* tcp = (TCPHeader*)(pkt + sizeof(EthernetHeader) + 20);
+            tcp->src_port = htons(sock.src_port);
+            tcp->dest_port = htons(sock.dest_port);
+            tcp->seq = htonl(sock.my_seq);
+            tcp->ack = htonl(sock.my_ack);
+            tcp->data_offset = (5 << 4);
+            tcp->flags = 0x18; // PSH|ACK
+            tcp->window = htons(4096);
+            tcp->checksum = 0;
+            tcp->urgent = 0;
+
+            char* payload = (char*)tcp + 20;
+            for (size_t i = 0; i < len; i++) {
+                payload[i] = ((const char*)buf)[i];
+            }
+
+            tcp->checksum = tcp_checksum(ip->src_ip, ip->dest_ip, tcp, 20 + len);
+
+            drivers::e1000_send_packet(pkt, sizeof(EthernetHeader) + 40 + len);
+
+            sock.my_seq += len;
+            frame->rax = len;
+            break;
+        }
+
+        case 19: { // sys_recv
+            int sockfd = (int)frame->rdi;
+            void* buf = (void*)frame->rsi;
+            size_t len = (size_t)frame->rdx;
+            int flags = (int)frame->r10;
+            (void)flags;
+
+            int sock_idx = sockfd - 100;
+            if (sock_idx < 0 || sock_idx >= 16 || !sockets[sock_idx].active) {
+                frame->rax = (uint64_t)-9; // EBADF
+                break;
+            }
+
+            if (!syscall_validate_buffer(buf, len)) {
+                frame->rax = (uint64_t)-14; // EFAULT
+                break;
+            }
+
+            Socket& sock = sockets[sock_idx];
+            int timeout = 5000000;
+            while (sock.rx_len == 0 && sock.state == SOCKET_ESTABLISHED && timeout > 0) {
+                pci_poll_network();
+                timeout--;
+            }
+
+            if (sock.rx_len > 0) {
+                size_t to_copy = sock.rx_len;
+                if (to_copy > len) to_copy = len;
+
+                for (size_t i = 0; i < to_copy; i++) {
+                    ((char*)buf)[i] = sock.rx_buffer[i];
+                }
+
+                for (size_t i = to_copy; i < sock.rx_len; i++) {
+                    sock.rx_buffer[i - to_copy] = sock.rx_buffer[i];
+                }
+                sock.rx_len -= to_copy;
+
+                frame->rax = to_copy;
+            } else {
+                frame->rax = 0;
+            }
             break;
         }
 
