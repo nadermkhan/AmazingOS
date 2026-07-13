@@ -3608,14 +3608,75 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
         }
     }
 
-    // 5.5 Taskbar Hover Tracking
+    // 5.5 Dock Hover Tracking
     if (!state_updated) {
-        bool old_hover = (old_y >= height - TASKBAR_HEIGHT) || (start_menu_active && old_x >= 0 && old_x <= 380 && old_y >= height - TASKBAR_HEIGHT - 450);
-        bool new_hover = (new_y >= height - TASKBAR_HEIGHT) || (start_menu_active && new_x >= 0 && new_x <= 380 && new_y >= height - TASKBAR_HEIGHT - 450);
-
-        if (new_hover || old_hover) {
-            dirty.add({0, height - TASKBAR_HEIGHT - 450, width, TASKBAR_HEIGHT + 450});
+        int dx = (width - DOCK_WIDTH) / 2;
+        int dy = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+        
+        // Calculate dock hover state for old mouse position
+        int old_hover_idx = -1;
+        if (old_x >= dx && old_x < dx + DOCK_WIDTH && old_y >= dy && old_y < dy + DOCK_HEIGHT) {
+            int gap = (int)(16 * ui_scale);
+            int icon_size = DOCK_ICON_SIZE;
+            int total_icons_w = 5 * icon_size + 4 * gap;
+            int start_x = dx + (DOCK_WIDTH - total_icons_w) / 2;
+            for (int i = 0; i < 5; i++) {
+                int ix = start_x + i * (icon_size + gap);
+                if (old_x >= ix && old_x < ix + icon_size) {
+                    old_hover_idx = i;
+                    break;
+                }
+            }
+        }
+        
+        // Calculate dock hover state for new mouse position
+        int new_hover_idx = -1;
+        if (new_x >= dx && new_x < dx + DOCK_WIDTH && new_y >= dy && new_y < dy + DOCK_HEIGHT) {
+            int gap = (int)(16 * ui_scale);
+            int icon_size = DOCK_ICON_SIZE;
+            int total_icons_w = 5 * icon_size + 4 * gap;
+            int start_x = dx + (DOCK_WIDTH - total_icons_w) / 2;
+            for (int i = 0; i < 5; i++) {
+                int ix = start_x + i * (icon_size + gap);
+                if (new_x >= ix && new_x < ix + icon_size) {
+                    new_hover_idx = i;
+                    break;
+                }
+            }
+        }
+        
+        if (old_hover_idx != new_hover_idx) {
+            // The hovered icon changed! Redraw the Dock region.
+            // Bounding box of Dock (incorporating tooltip padding and scale-up margin)
+            int d_dirty_x = dx - 20;
+            int d_dirty_y = dy - 40;
+            int d_dirty_w = DOCK_WIDTH + 40;
+            int d_dirty_h = DOCK_HEIGHT + DOCK_MARGIN_BOTTOM + 40;
+            dirty.add({d_dirty_x, d_dirty_y, d_dirty_w, d_dirty_h});
             needs_redraw = true;
+        }
+    }
+
+    // 5.6 Window Traffic Lights Hover Tracking
+    if (!state_updated) {
+        for (Window* w = window_list_head; w; w = w->next) {
+            if (w->is_minimized) continue;
+            int wx = w->rect.x;
+            int wy = w->rect.y;
+            
+            int x_min = wx + 10;
+            int x_max = wx + 62;
+            int y_min = wy + 9;
+            int y_max = wy + 21;
+            
+            bool old_inside = (old_x >= x_min && old_x <= x_max && old_y >= y_min && old_y <= y_max);
+            bool new_inside = (new_x >= x_min && new_x <= x_max && new_y >= y_min && new_y <= y_max);
+            
+            if (old_inside != new_inside) {
+                // Hover state of traffic lights changed for this window
+                dirty.add({wx + 8, wy + 5, 58, 20});
+                needs_redraw = true;
+            }
         }
     }
 
