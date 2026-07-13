@@ -501,11 +501,13 @@ void gui_demo_thread(void* arg) {
 
             if (got_packet) {
                 int speed = (accum_dx < 0 ? -accum_dx : accum_dx) + (accum_dy < 0 ? -accum_dy : accum_dy);
-                int scale_num = 10;
+                int scale_num = 12;
                 if (speed > 16) {
-                    scale_num = 14;
+                    scale_num = 24;
                 } else if (speed > 8) {
-                    scale_num = 12;
+                    scale_num = 18;
+                } else if (speed > 4) {
+                    scale_num = 14;
                 }
 
                 int scaled_dx = accum_dx * scale_num + mouse_remainder_x;
@@ -528,7 +530,8 @@ void gui_demo_thread(void* arg) {
                 wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, any_left, any_right);
             }
         } else {
-            // Process each packet individually for ultra-smooth 100Hz hardware cursor tracking
+            // Process each packet individually for ultra-smooth 100Hz hardware cursor tracking,
+            // but only render the final composed frame once to avoid VRAM write saturation!
             int dx = accum_dx;
             int dy = accum_dy;
             bool left = any_left;
@@ -539,11 +542,13 @@ void gui_demo_thread(void* arg) {
                 first_packet = false;
                 
                 int speed = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
-                int scale_num = 10;
+                int scale_num = 12;
                 if (speed > 16) {
-                    scale_num = 14;
+                    scale_num = 24;
                 } else if (speed > 8) {
-                    scale_num = 12;
+                    scale_num = 18;
+                } else if (speed > 4) {
+                    scale_num = 14;
                 }
 
                 int scaled_dx = dx * scale_num + mouse_remainder_x;
@@ -564,7 +569,6 @@ void gui_demo_thread(void* arg) {
                 if (cursor_y >= height) cursor_y = height - 1;
 
                 wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, left, right);
-                wm::WindowManager::draw_desktop();
             }
         }
 
