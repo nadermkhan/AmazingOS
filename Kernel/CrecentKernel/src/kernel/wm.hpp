@@ -7,6 +7,18 @@ namespace wm {
 
 using drivers::Rect;
 
+struct DirtyList {
+    Rect rects[16];
+    int count = 0;
+
+    void clear() {
+        count = 0;
+    }
+
+    void add(const Rect& r);
+    Rect get_bounding_box() const;
+};
+
 class Window {
 public:
     int id;
@@ -56,8 +68,6 @@ private:
     static ContextMenu active_menu;
 
     static void focus_window(Window* win);
-    static void draw_cursor();
-    static void erase_cursor();
 
     // Internal WhiteSur helpers
     static void draw_wallpaper();
@@ -89,6 +99,7 @@ private:
     static void draw_all_windows();
     static void blit_cursor();
     static void redraw_dirty_rect(const Rect& dirty);
+    static void redraw_dirty_list(const DirtyList& list);
 
     static void int_to_str(int v, char* buf, int len);
 
@@ -98,6 +109,8 @@ private:
 
 public:
     static void init();
+    static void draw_cursor();
+    static void erase_cursor();
     static int get_string_width(const char* s, float size);
     static void draw_string(const char* s, int x, int y, uint32_t c, float size);
     static Window* create_window(int x, int y, int w, int h, const char* title, uint32_t color);
@@ -106,7 +119,10 @@ public:
 
     static void draw_desktop();
     static void draw_mac_decorations();
+    static void draw_taskbar();
+    static void draw_start_menu();
     static void force_redraw_all();
+    static void invalidate_window(int id);
     static void trigger_host_persist();
     static void handle_mouse_move(int new_x, int new_y, bool left_pressed, bool right_pressed);
     static void handle_key_press(char c);

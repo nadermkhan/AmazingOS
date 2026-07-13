@@ -2,6 +2,7 @@
 #include "../kernel/vmm.hpp"
 #include "../kernel/heap.hpp"
 #include "font.hpp"
+#include "serial.hpp"
 
 extern "C" void* memcpy(void* dest, const void* src, size_t n);
 
@@ -39,21 +40,24 @@ uint64_t Framebuffer::detect_bga() {
     return 0xFD000000ULL;
 }
 
+static int current_page = 0;
+
 static void bga_write(uint16_t index, uint16_t data) {
     __asm__ __volatile__ ("outw %0, %1" : : "a"(index), "d"((uint16_t)0x01CE));
     __asm__ __volatile__ ("outw %0, %1" : : "a"(data), "d"((uint16_t)0x01CF));
 }
 
 void Framebuffer::setup_bga(uint32_t w, uint32_t h, uint32_t b) {
-    bga_write(4, 0);
-    bga_write(1, w);
-    bga_write(2, h);
-    bga_write(3, b);
-    bga_write(5, w);
-    bga_write(6, h);
-    bga_write(7, 0);
-    bga_write(8, 0);
-    bga_write(4, 0x01 | 0x40);
+    bga_write(4, 0);      // Disable VBE extensions
+    bga_write(1, w);      // XRES
+    bga_write(2, h);      // YRES
+    bga_write(3, b);      // BPP
+    bga_write(5, 0);      // BANK (set to 0)
+    bga_write(6, w);      // VIRT_WIDTH
+    bga_write(7, h * 2);  // VIRT_HEIGHT (doubled for hardware double-buffering)
+    bga_write(8, 0);      // X_OFFSET
+    bga_write(9, 0);      // Y_OFFSET
+    bga_write(4, 0x01 | 0x40); // Re-enable extensions with LFB enabled
 }
 
 uint64_t Framebuffer::physical_base = 0;
@@ -79,9 +83,23 @@ bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, u
     
     virtual_base = (uint32_t*)0xE00000000ULL;
 
-    for (uint64_t offset = 0; offset < size; offset += 4096) {
+    // Configure IA32_PAT MSR (0x277) to set PAT2 to Write-Combining (1)
+    // Default PAT: PAT0=WB(6), PAT1=WT(4), PAT2=UC-(7), PAT3=UC(0)
+    // We modify PAT2 to WC (1) so that PCD=1, PWT=0 maps to Write-Combining memory.
+    {
+        uint32_t low, high;
+        __asm__ __volatile__ ("rdmsr" : "=a"(low), "=d"(high) : "c"(0x277));
+        uint64_t pat = ((uint64_t)high << 32) | low;
+        pat &= ~(0x7ULL << 16); // Clear PAT2 (bits 16-18)
+        pat |= (0x1ULL << 16);  // Set PAT2 to Write-Combining (1)
+        low = (uint32_t)pat;
+        high = (uint32_t)(pat >> 32);
+        __asm__ __volatile__ ("wrmsr" : : "c"(0x277), "a"(low), "d"(high));
+    }
+
+    for (uint64_t offset = 0; offset < size * 2; offset += 4096) {
         kernel::vmm_map_page((uint64_t)virtual_base + offset, physical_base + offset, 
-                             kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_WRITE_THR);
+                             kernel::VMM_FLAG_PRESENT | kernel::VMM_FLAG_WRITABLE | kernel::VMM_FLAG_CACHE_DIS);
     }
 
     back_buffer = (uint32_t*)kernel::kmalloc(size);
@@ -143,6 +161,11 @@ uint32_t Framebuffer::get_pixel(uint32_t x, uint32_t y) {
     if (!initialized || 
         x < (uint32_t)clip_rect.x || x >= (uint32_t)(clip_rect.x + clip_rect.w) ||
         y < (uint32_t)clip_rect.y || y >= (uint32_t)(clip_rect.y + clip_rect.h)) return 0;
+    return back_buffer[y * (pitch / 4) + x];
+}
+
+uint32_t Framebuffer::get_pixel_unclipped(uint32_t x, uint32_t y) {
+    if (!initialized || x >= width || y >= height) return 0;
     return back_buffer[y * (pitch / 4) + x];
 }
 
@@ -209,6 +232,8 @@ void Framebuffer::draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h
     }
 }
 
+extern "C" float sqrtf(float x);
+
 void Framebuffer::draw_rounded_rect_alpha(int x, int y, int w, int h, int r, uint32_t color, uint8_t alpha) {
     if (!initialized || alpha == 0) return;
     
@@ -219,66 +244,58 @@ void Framebuffer::draw_rounded_rect_alpha(int x, int y, int w, int h, int r, uin
     int start_y = y < clip_rect.y ? clip_rect.y : y;
     int end_y = (y + h) > (clip_rect.y + clip_rect.h) ? (clip_rect.y + clip_rect.h) : (y + h);
     if (start_y >= end_y) return;
+    
+    int start_x_clip = x < clip_rect.x ? clip_rect.x : x;
+    int end_x_clip = (x + w) > (clip_rect.x + clip_rect.w) ? (clip_rect.x + clip_rect.w) : (x + w);
+    if (start_x_clip >= end_x_clip) return;
 
     uint32_t pitch_words = pitch / 4;
-    
-    constexpr int MAX_R = 512;
-    if (r > MAX_R) r = MAX_R;
-    
-    int corner_extents[MAX_R + 1] = {0};
-    if (r > 0) {
-        int cx_mid = r, cy_mid = 0;
-        int err = 1 - r;
-        while (cx_mid >= cy_mid) {
-            corner_extents[cy_mid] = cx_mid;
-            corner_extents[cx_mid] = cy_mid;
-            cy_mid++;
-            if (err < 0) {
-                err += 2 * cy_mid + 1;
-            } else {
-                cx_mid--;
-                err += 2 * (cy_mid - cx_mid) + 1;
-            }
-        }
-    }
-
-    const uint32_t src_rb = (color & 0xFF00FF) * alpha;
-    const uint32_t src_g  = (color & 0x00FF00) * alpha;
-    const uint32_t inv    = 255 - alpha;
+    const uint32_t src_rb = (color & 0xFF00FF);
+    const uint32_t src_g  = (color & 0x00FF00);
 
     for (int cy = start_y; cy < end_y; ++cy) {
-        int ry = cy - y; 
-        int start_x = x;
-        int end_x = x + w - 1;
-
-        if (r > 0 && (ry < r || ry >= h - r)) {
-            int dx_top = 0, dx_bot = 0;
-            if (ry < r) {
-                dx_top = corner_extents[r - ry];
-            }
-            if (ry >= h - r) {
-                dx_bot = corner_extents[ry - (h - 1 - r)];
-            }
-            int dx = dx_top > dx_bot ? dx_top : dx_bot;
-            int corner_w = r - dx;
-            start_x += corner_w;
-            end_x -= corner_w;
-        }
-
-        if (start_x < clip_rect.x) start_x = clip_rect.x;
-        if (end_x >= clip_rect.x + clip_rect.w) end_x = clip_rect.x + clip_rect.w - 1;
-        if (start_x > end_x) continue;
-
         uint32_t line_offset = cy * pitch_words;
-        if (alpha == 255) {
-            for (int cx = start_x; cx <= end_x; ++cx) {
-                back_buffer[line_offset + cx] = color;
+        
+        for (int cx = start_x_clip; cx < end_x_clip; ++cx) {
+            bool draw = true;
+            uint8_t pixel_alpha = alpha;
+            
+            // Check if we are in one of the 4 corners
+            if (r > 0) {
+                int dx = 0, dy = 0;
+                if (cx < x + r) dx = (x + r) - cx;
+                else if (cx >= x + w - r) dx = cx - (x + w - 1 - r);
+                
+                if (cy < y + r) dy = (y + r) - cy;
+                else if (cy >= y + h - r) dy = cy - (y + h - 1 - r);
+                
+                if (dx > 0 && dy > 0) {
+                    int dist_sq = dx * dx + dy * dy;
+                    int r_sq = r * r;
+                    if (dist_sq > r_sq) {
+                        draw = false;
+                    } else if (dist_sq > (r - 1) * (r - 1)) {
+                        int diff = dist_sq - (r - 1) * (r - 1);
+                        int denom = 2 * r - 1;
+                        int coverage = 256 - (diff * 256) / denom;
+                        if (coverage < 0) coverage = 0;
+                        if (coverage > 256) coverage = 256;
+                        pixel_alpha = (uint8_t)((alpha * coverage) >> 8);
+                    }
+                }
             }
-        } else {
-            for (int cx = start_x; cx <= end_x; ++cx) {
+            
+            if (!draw) continue;
+            
+            if (pixel_alpha == 255) {
+                back_buffer[line_offset + cx] = color;
+            } else if (pixel_alpha > 0) {
                 uint32_t bg = back_buffer[line_offset + cx];
-                uint32_t rb = (src_rb + (bg & 0xFF00FF) * inv) >> 8;
-                uint32_t g  = (src_g  + (bg & 0x00FF00) * inv) >> 8;
+                uint32_t inv = 255 - pixel_alpha;
+                uint32_t s_rb = src_rb * pixel_alpha;
+                uint32_t s_g = src_g * pixel_alpha;
+                uint32_t rb = (s_rb + (bg & 0xFF00FF) * inv) >> 8;
+                uint32_t g  = (s_g  + (bg & 0x00FF00) * inv) >> 8;
                 back_buffer[line_offset + cx] = (rb & 0xFF00FF) | (g & 0x00FF00);
             }
         }
@@ -339,8 +356,118 @@ void Framebuffer::draw_circle_filled_alpha(int xc, int yc, int r, uint32_t color
 
 static uint32_t wallpaper_lut[3000];
 
+static float fast_sin(float x) {
+    float pi = 3.14159265f;
+    float two_pi = 6.2831853f;
+    if (x > 100.0f || x < -100.0f) {
+        float q = x * 0.15915494f; // x / two_pi
+        int qi = (int)q;
+        x = x - (float)qi * two_pi;
+    }
+    while (x > pi) x -= two_pi;
+    while (x < -pi) x += two_pi;
+    float x2 = x * x;
+    return x * (1.0f - x2 * (0.16666667f - x2 * (0.00833333f - x2 * 0.00019841f)));
+}
+
 void Framebuffer::generate_wallpaper_procedural(uint32_t* dst) {
     uint32_t pitch_words = pitch / 4;
+
+    if (wallpaper_theme_id == 0) {
+        // Windows XP "Bliss" HD Procedural Wallpaper
+        
+        // 1. Precalculate hill heights per column
+        static float back_hill_y[2048];
+        static float front_hill_y[2048];
+        uint32_t max_w = width < 2048 ? width : 2048;
+        for (uint32_t cx = 0; cx < max_w; ++cx) {
+            float x_norm = (float)cx / width;
+            back_hill_y[cx] = height * 0.65f + height * 0.08f * fast_sin(x_norm * 4.2f + 1.5f);
+            front_hill_y[cx] = height * 0.72f + height * 0.09f * fast_sin(x_norm * 3.1f - 0.5f);
+        }
+
+        // 2. Predefine cloud blobs with precalculated inverse squared radius
+        struct CloudBlob {
+            float x, y, inv_r2;
+        };
+        CloudBlob clouds[] = {
+            { 300.0f, 150.0f, 1.0f / (90.0f * 90.0f) },
+            { 380.0f, 170.0f, 1.0f / (120.0f * 120.0f) },
+            { 470.0f, 160.0f, 1.0f / (100.0f * 100.0f) },
+            { 1200.0f, 180.0f, 1.0f / (140.0f * 140.0f) },
+            { 1320.0f, 200.0f, 1.0f / (160.0f * 160.0f) },
+            { 1450.0f, 170.0f, 1.0f / (110.0f * 110.0f) }
+        };
+
+        for (uint32_t cy = 0; cy < height; ++cy) {
+            uint32_t line_offset = cy * pitch_words;
+            float y_norm = (float)cy / height;
+
+            // Sky gradient: deep blue at top -> light sky blue near horizon
+            uint8_t sky_r = (uint8_t)((1.0f - y_norm) * 0x0A + y_norm * 0x7E); // 10 -> 126
+            uint8_t sky_g = (uint8_t)((1.0f - y_norm) * 0x48 + y_norm * 0xB8); // 72 -> 184
+            uint8_t sky_b = (uint8_t)((1.0f - y_norm) * 0xC2 + y_norm * 0xFB); // 194 -> 251
+
+            for (uint32_t cx = 0; cx < width; ++cx) {
+                float x_norm = (float)cx / width;
+
+                uint8_t r = sky_r;
+                uint8_t g = sky_g;
+                uint8_t b = sky_b;
+
+                // Procedural fluffy white clouds in the sky using fast circular blobs
+                float cloud_val = 0.0f;
+                if (cy < height * 0.55f) {
+                    for (int i = 0; i < 6; ++i) {
+                        float dx = (float)cx - clouds[i].x;
+                        float dy = (float)cy - clouds[i].y;
+                        float dist2 = dx * dx + dy * dy;
+                        float inv_r2 = clouds[i].inv_r2;
+                        float ratio = dist2 * inv_r2;
+                        if (ratio < 1.0f) {
+                            float f = 1.0f - ratio;
+                            cloud_val += f * f * 0.6f;
+                        }
+                    }
+                    if (cloud_val > 1.0f) cloud_val = 1.0f;
+                }
+                
+                r = (uint8_t)(r * (1.0f - cloud_val) + 255 * cloud_val);
+                g = (uint8_t)(g * (1.0f - cloud_val) + 255 * cloud_val);
+                b = (uint8_t)(b * (1.0f - cloud_val) + 248 * cloud_val); // slightly warm white
+
+                // Get precalculated hill heights
+                float b_hill = back_hill_y[cx < 2048 ? cx : 2047];
+                float f_hill = front_hill_y[cx < 2048 ? cx : 2047];
+
+                if ((float)cy >= f_hill) {
+                    // Front hill: vibrant green with sunshine highlight at peak
+                    float depth = ((float)cy - f_hill) / (height - f_hill + 1);
+                    float sun_factor = fast_sin(x_norm * 3.1f - 0.5f);
+                    if (sun_factor < 0) sun_factor = 0;
+
+                    uint8_t hill_r = (uint8_t)((1.0f - depth) * (38 + sun_factor * 18) + depth * 15);
+                    uint8_t hill_g = (uint8_t)((1.0f - depth) * (162 + sun_factor * 33) + depth * 85);
+                    uint8_t hill_b = (uint8_t)((1.0f - depth) * (38 + sun_factor * 12) + depth * 15);
+
+                    r = hill_r; g = hill_g; b = hill_b;
+                } else if ((float)cy >= b_hill) {
+                    // Back hill: darker green/teal for depth atmospheric perspective
+                    float depth = ((float)cy - b_hill) / (height - b_hill + 1);
+                    float sun_factor = fast_sin(x_norm * 4.2f + 1.5f);
+                    if (sun_factor < 0) sun_factor = 0;
+
+                    uint8_t hill_r = (uint8_t)((1.0f - depth) * (24 + sun_factor * 12) + depth * 10);
+                    uint8_t hill_g = (uint8_t)((1.0f - depth) * (118 + sun_factor * 22) + depth * 65);
+                    uint8_t hill_b = (uint8_t)((1.0f - depth) * (45 + sun_factor * 8) + depth * 25);
+
+                    r = hill_r; g = hill_g; b = hill_b;
+                }
+
+                dst[line_offset + cx] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
 
     if (wallpaper_theme_id == 3) {
         for (uint32_t cy = 0; cy < height; ++cy) {
@@ -507,28 +634,105 @@ void Framebuffer::draw_string(const char* str, uint32_t x, uint32_t y, uint32_t 
 void Framebuffer::swap_buffers() {
     if (!initialized) return;
     uint64_t total_bytes = (uint64_t)height * pitch;
-    memcpy(virtual_base, back_buffer, total_bytes);
+    int back_page = current_page ^ 1;
+    
+    // 1. Copy full screen to the hidden back page in VRAM
+    uint32_t* dest_back = (uint32_t*)((uint64_t)virtual_base + back_page * total_bytes);
+    memcpy(dest_back, back_buffer, total_bytes);
+    
+    // 2. Perform the hardware page flip
+    bga_write(9, back_page * height);
+    
+    // 3. Copy full screen to the old visible page (new back page) to keep them in sync
+    uint32_t* dest_front = (uint32_t*)((uint64_t)virtual_base + current_page * total_bytes);
+    memcpy(dest_front, back_buffer, total_bytes);
+    
+    current_page = back_page;
 }
 
 void Framebuffer::swap_dirty_rect(Rect r) {
     if (!initialized) return;
 
-    int x1 = r.x; if (x1 < 0) x1 = 0;
-    int y1 = r.y; if (y1 < 0) y1 = 0;
-    int x2 = r.x + r.w; if (x2 > (int)width) x2 = width;
-    int y2 = r.y + r.h; if (y2 > (int)height) y2 = height;
-    
-    if (x2 < x1) x2 = x1;
-    if (y2 < y1) y2 = y1;
+    // Clip rectangle to strictly fit hardware bounds
+    int start_x = r.x < 0 ? 0 : r.x;
+    int start_y = r.y < 0 ? 0 : r.y;
+    int end_x = r.x + r.w > (int)width ? (int)width : r.x + r.w;
+    int end_y = r.y + r.h > (int)height ? (int)height : r.y + r.h;
 
-    if (x1 >= x2 || y1 >= y2) return;
+    if (start_x >= end_x || start_y >= end_y) return;
 
     uint32_t pitch_words = pitch / 4;
-    uint64_t bytes_to_copy = (uint64_t)(x2 - x1) * sizeof(uint32_t);
-    for (int y = y1; y < y2; ++y) {
-        uint64_t line_offset = (uint64_t)y * pitch_words;
-        memcpy(virtual_base + line_offset + x1, back_buffer + line_offset + x1, bytes_to_copy);
+    uint32_t bytes_per_line = (end_x - start_x) * sizeof(uint32_t);
+    uint64_t total_bytes = (uint64_t)height * pitch;
+
+    int back_page = current_page ^ 1;
+    uint32_t* back_buffer_vram = (uint32_t*)((uint64_t)virtual_base + back_page * total_bytes);
+
+    // Transfer exclusively the damaged geometry to the hidden page in VRAM
+    for (int cy = start_y; cy < end_y; ++cy) {
+        uint64_t offset = (uint64_t)cy * pitch_words + start_x;
+        memcpy(&back_buffer_vram[offset], &back_buffer[offset], bytes_per_line);
     }
+
+    // Toggle the visible page
+    bga_write(9, back_page * height);
+
+    // To keep the new back page in sync, also copy the dirty rect to it
+    uint32_t* front_buffer_vram = (uint32_t*)((uint64_t)virtual_base + current_page * total_bytes);
+    for (int cy = start_y; cy < end_y; ++cy) {
+        uint64_t offset = (uint64_t)cy * pitch_words + start_x;
+        memcpy(&front_buffer_vram[offset], &back_buffer[offset], bytes_per_line);
+    }
+
+    current_page = back_page;
+}
+
+void Framebuffer::swap_dirty_rects(const Rect* rects, int count) {
+    if (!initialized || count <= 0 || !rects) return;
+
+    uint32_t pitch_words = pitch / 4;
+    uint64_t total_bytes = (uint64_t)height * pitch;
+
+    int back_page = current_page ^ 1;
+    uint32_t* back_buffer_vram = (uint32_t*)((uint64_t)virtual_base + back_page * total_bytes);
+
+    // 1. Transfer all dirty regions to the hidden page in VRAM
+    for (int i = 0; i < count; ++i) {
+        Rect r = rects[i];
+        int start_x = r.x < 0 ? 0 : r.x;
+        int start_y = r.y < 0 ? 0 : r.y;
+        int end_x = r.x + r.w > (int)width ? (int)width : r.x + r.w;
+        int end_y = r.y + r.h > (int)height ? (int)height : r.y + r.h;
+        if (start_x >= end_x || start_y >= end_y) continue;
+
+        uint32_t bytes_per_line = (end_x - start_x) * sizeof(uint32_t);
+        for (int cy = start_y; cy < end_y; ++cy) {
+            uint64_t offset = (uint64_t)cy * pitch_words + start_x;
+            memcpy(&back_buffer_vram[offset], &back_buffer[offset], bytes_per_line);
+        }
+    }
+
+    // 2. Perform a single hardware page flip
+    bga_write(9, back_page * height);
+
+    // 3. Keep the new back page in sync by copying the same regions
+    uint32_t* front_buffer_vram = (uint32_t*)((uint64_t)virtual_base + current_page * total_bytes);
+    for (int i = 0; i < count; ++i) {
+        Rect r = rects[i];
+        int start_x = r.x < 0 ? 0 : r.x;
+        int start_y = r.y < 0 ? 0 : r.y;
+        int end_x = r.x + r.w > (int)width ? (int)width : r.x + r.w;
+        int end_y = r.y + r.h > (int)height ? (int)height : r.y + r.h;
+        if (start_x >= end_x || start_y >= end_y) continue;
+
+        uint32_t bytes_per_line = (end_x - start_x) * sizeof(uint32_t);
+        for (int cy = start_y; cy < end_y; ++cy) {
+            uint64_t offset = (uint64_t)cy * pitch_words + start_x;
+            memcpy(&front_buffer_vram[offset], &back_buffer[offset], bytes_per_line);
+        }
+    }
+
+    current_page = back_page;
 }
 
 void Framebuffer::blit_buffer(int x, int y, int w, int h, const uint32_t* src_buf) {

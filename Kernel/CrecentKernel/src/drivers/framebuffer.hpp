@@ -38,11 +38,14 @@ public:
     static uint64_t detect_bga();
     static void setup_bga(uint32_t w, uint32_t h, uint32_t b);
     static bool init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, uint8_t b);
+    static uint32_t* get_virtual_base() { return virtual_base; }
+    static uint32_t* get_back_buffer() { return back_buffer; }
     static void clear(uint32_t color);
     
     // Core drawing primitives
     static void draw_pixel(uint32_t x, uint32_t y, uint32_t color);
     static uint32_t get_pixel(uint32_t x, uint32_t y);
+    static uint32_t get_pixel_unclipped(uint32_t x, uint32_t y);
     static void draw_pixel_physical(uint32_t x, uint32_t y, uint32_t color);
     static void draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
     static void draw_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color, uint8_t alpha);
@@ -59,11 +62,13 @@ public:
     // Double buffering blit routines
     static void swap_buffers();
     static void swap_dirty_rect(Rect r);
+    static void swap_dirty_rects(const Rect* rects, int count);
     static void swap_dirty_rect_fast(Rect r);
     
     // Dimension getters
     static uint32_t get_width() { return width; }
     static uint32_t get_height() { return height; }
+    static uint32_t get_pitch_words() { return pitch / 4; }
     static bool is_initialized() { return initialized; }
 };
 

@@ -467,18 +467,30 @@ void gui_demo_thread(void* arg) {
     drivers::Serial::println("[DEMO] Entering interactive desktop loop. You can now move mouse / drag windows freely.");
 
     // 7. Compositor Refresh & Polling Loop (TSC-Budget Locked to 60 FPS)
+    int deferred_mouse_dx = 0;
+    int deferred_mouse_dy = 0;
+    bool deferred_mouse_pending = false;
+    bool deferred_mouse_left = false;
+    bool deferred_mouse_right = false;
+    int mouse_remainder_x = 0;
+    int mouse_remainder_y = 0;
+
     while (true) {
         uint64_t start_time = rdtsc();
 
         // Poll mouse coordinates (drain the hardware queue completely before handling)
-        int accum_dx = 0;
-        int accum_dy = 0;
-        bool any_left = false;
-        bool any_right = false;
-        bool got_packet = false;
+        int accum_dx = deferred_mouse_dx;
+        int accum_dy = deferred_mouse_dy;
+        bool any_left = deferred_mouse_left;
+        bool any_right = deferred_mouse_right;
+        bool got_packet = deferred_mouse_pending;
         int last_dx = 0;
         int last_dy = 0;
-        
+
+        deferred_mouse_dx = 0;
+        deferred_mouse_dy = 0;
+        deferred_mouse_pending = false;
+
         while (drivers::Ps2::poll_mouse(last_dx, last_dy, m_left, m_right)) {
             accum_dx += last_dx;
             accum_dy += last_dy;
@@ -490,15 +502,18 @@ void gui_demo_thread(void* arg) {
         if (got_packet) {
             int speed = (accum_dx < 0 ? -accum_dx : accum_dx) + (accum_dy < 0 ? -accum_dy : accum_dy);
             int scale_num = 10;
-            if (speed < 4) {
-                scale_num = 4;
-            } else if (speed > 16) {
+            if (speed > 16) {
                 scale_num = 14;
-            } else {
-                scale_num = 4 + (speed - 4) / 2;
+            } else if (speed > 8) {
+                scale_num = 12;
             }
-            accum_dx = (accum_dx * scale_num) / 10;
-            accum_dy = (accum_dy * scale_num) / 10;
+
+            int scaled_dx = accum_dx * scale_num + mouse_remainder_x;
+            int scaled_dy = accum_dy * scale_num + mouse_remainder_y;
+            accum_dx = scaled_dx / 10;
+            accum_dy = scaled_dy / 10;
+            mouse_remainder_x = scaled_dx % 10;
+            mouse_remainder_y = scaled_dy % 10;
 
             cursor_x += accum_dx;
             cursor_y -= accum_dy;
@@ -532,10 +547,20 @@ void gui_demo_thread(void* arg) {
         wm::WindowManager::tick();
         wm::WindowManager::draw_desktop();
         
-        // Wait out the remainder of our 16.6ms budget via low-power hlt context yields
+        // Wait out the remainder of our 16.6ms budget while batching input for the next frame.
         uint64_t target_tsc = start_time + tsc_per_frame;
         while (rdtsc() < target_tsc) {
             __asm__ __volatile__ ("hlt");
+
+            // Coalesce wake-up input and present it on the next compositor tick.
+            int temp_dx = 0, temp_dy = 0;
+            while (drivers::Ps2::poll_mouse(temp_dx, temp_dy, m_left, m_right)) {
+                deferred_mouse_dx += temp_dx;
+                deferred_mouse_dy += temp_dy;
+                deferred_mouse_left = m_left;
+                deferred_mouse_right = m_right;
+                deferred_mouse_pending = true;
+            }
         }
     }
 }

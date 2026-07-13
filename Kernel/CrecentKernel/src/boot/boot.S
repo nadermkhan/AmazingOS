@@ -24,8 +24,8 @@ multiboot1_start:
     .long 0
     # Graphics parameters
     .long 0             # 0 = Linear Graphics Mode (framebuffer)
-    .long 1024          # Width
-    .long 768           # Height
+    .long 1920          # Width
+    .long 1080          # Height
     .long 32            # BPP
 multiboot1_end:
 
@@ -37,7 +37,17 @@ multiboot2_start:
     .long HEADER_LENGTH
     .long MULTIBOOT2_CHECKSUM
 
+    # Framebuffer Tag (Type 5)
+    .align 8
+    .short 5            # Type
+    .short 0            # Flags
+    .long 20            # Size
+    .long 1920          # Width
+    .long 1080          # Height
+    .long 32            # BPP
+
     # End tag (required by Multiboot2 spec)
+    .align 8
     .short 0   # Type
     .short 0   # Flags
     .long 8    # Size

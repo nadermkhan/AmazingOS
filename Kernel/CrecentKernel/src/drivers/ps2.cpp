@@ -40,7 +40,7 @@ struct MouseEvent {
     }
 };
 
-#define MOUSE_RING_SIZE 64
+#define MOUSE_RING_SIZE 256
 static volatile MouseEvent mouse_ring[MOUSE_RING_SIZE];
 static volatile uint32_t mouse_head = 0;
 static volatile uint32_t mouse_tail = 0;

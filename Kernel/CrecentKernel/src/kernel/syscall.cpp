@@ -551,7 +551,7 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             }
 
             memcpy(win->buffer, user_buf, size_bytes);
-            wm::WindowManager::force_redraw_all();
+            wm::WindowManager::invalidate_window(win_id);
 
             frame->rax = 0;
             break;
@@ -699,7 +699,7 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
             int client_h = win->rect.h - 42;
 
             drivers::TtfRenderer::draw_string_target(win->buffer, client_w, client_h, user_str, x, y, color, (float)size);
-            wm::WindowManager::force_redraw_all();
+            wm::WindowManager::invalidate_window(win_id);
 
             frame->rax = 0;
             break;
