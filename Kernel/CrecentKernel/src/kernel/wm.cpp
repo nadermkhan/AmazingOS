@@ -3699,7 +3699,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
         }
     }
 
-    // 6. Execute at most one clipped present for pointer-only updates.
+    // 6. Queue all calculated dirty regions to the global pending_dirty list for consolidated redraw.
     if (!state_updated) {
         if (position_changed) {
             int cursor_size = (ui_scale >= 1.5f) ? cursor_2x_size : cursor_1x_size;
@@ -3710,9 +3710,11 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
             dirty.add(new_cursor);
             needs_redraw = true;
         }
+    }
 
-        if (needs_redraw || dirty.count > 0) {
-            redraw_dirty_list(dirty);
+    if (needs_redraw || dirty.count > 0) {
+        for (int i = 0; i < dirty.count; ++i) {
+            enqueue_pending_dirty(dirty.rects[i]);
         }
     }
 
