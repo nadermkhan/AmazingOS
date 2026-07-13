@@ -550,7 +550,7 @@ void gui_demo_thread(void* arg) {
         // Wait out the remainder of our 16.6ms budget while batching input for the next frame.
         uint64_t target_tsc = start_time + tsc_per_frame;
         while (rdtsc() < target_tsc) {
-            __asm__ __volatile__ ("hlt");
+            kernel::schedule(); // Yield CPU cooperatively
 
             // Coalesce wake-up input and present it on the next compositor tick.
             int temp_dx = 0, temp_dy = 0;
@@ -1152,7 +1152,7 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
 
         // Wait for GUI Window Compositor demo to complete its test sequence
         while (!gui_demo_complete) {
-            __asm__ __volatile__ ("hlt");
+            kernel::schedule();
         }
 
         // Disable interrupts before triggering the final Page Fault crash

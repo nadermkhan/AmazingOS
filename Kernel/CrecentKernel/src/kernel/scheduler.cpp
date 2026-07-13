@@ -223,38 +223,6 @@ void schedule() {
     next->state = THREAD_RUNNING;
     current_thread = next;
 
-    if (next->id >= 4 || prev->id >= 4) {
-        drivers::Serial::print("[SCHED] Switch: ");
-        
-        char p_id[16];
-        int idx = 0;
-        uint64_t temp = prev->id;
-        if (temp == 0) p_id[idx++] = '0';
-        else {
-            char rev[16];
-            int r_idx = 0;
-            while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
-            while (r_idx > 0) p_id[idx++] = rev[--r_idx];
-        }
-        p_id[idx] = '\0';
-        drivers::Serial::print(p_id);
-        
-        drivers::Serial::print(" -> ");
-        
-        char n_id[16];
-        idx = 0;
-        temp = next->id;
-        if (temp == 0) n_id[idx++] = '0';
-        else {
-            char rev[16];
-            int r_idx = 0;
-            while (temp > 0) { rev[r_idx++] = '0' + (temp % 10); temp /= 10; }
-            while (r_idx > 0) n_id[idx++] = rev[--r_idx];
-        }
-        n_id[idx] = '\0';
-        drivers::Serial::println(n_id);
-    }
-
     // Switch address space if necessary (and flush TLB)
     uint64_t current_cr3;
     __asm__ __volatile__ ("mov %%cr3, %0" : "=r"(current_cr3));
