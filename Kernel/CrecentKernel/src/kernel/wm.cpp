@@ -216,17 +216,29 @@ static Rect expanded_rect(const Rect& r, int pad) {
 
 void DirtyList::add(const Rect& r) {
     if (r.w <= 0 || r.h <= 0) return;
-    // Merge with overlapping rects
-    for (int i = 0; i < count; ++i) {
-        if (rects[i].intersects(r)) {
-            rects[i] = union_rects(rects[i], r);
-            return;
+    
+    Rect cur = r;
+    bool merged = true;
+    while (merged) {
+        merged = false;
+        for (int i = 0; i < count; ++i) {
+            if (rects[i].intersects(cur)) {
+                cur = union_rects(rects[i], cur);
+                // Remove rects[i] by shifting remaining rects down
+                for (int j = i; j < count - 1; ++j) {
+                    rects[j] = rects[j + 1];
+                }
+                count--;
+                merged = true;
+                break;
+            }
         }
     }
+    
     if (count < 16) {
-        rects[count++] = r;
+        rects[count++] = cur;
     } else {
-        rects[0] = union_rects(rects[0], r);
+        rects[0] = union_rects(rects[0], cur);
     }
 }
 
@@ -2325,20 +2337,21 @@ void WindowManager::redraw_dirty_rect(const Rect& dirty) {
 void WindowManager::redraw_dirty_list(const DirtyList& list) {
     if (list.count <= 0) return;
 
-    // 1. Calculate the bounding box of all changed regions
-    Rect bbox = list.get_bounding_box();
-    if (bbox.w <= 0 || bbox.h <= 0) return;
+    // Run composition pass individually for each dirty region to avoid drawing the large bounding box union
+    for (int i = 0; i < list.count; ++i) {
+        const Rect& r = list.rects[i];
+        if (r.w <= 0 || r.h <= 0) continue;
 
-    // 2. Run a single CPU composition pass to update the system RAM back_buffer inside the bbox
-    drivers::Framebuffer::set_clip_rect(bbox);
-    draw_wallpaper();
-    draw_desktop_icons();
-    draw_mac_decorations();
-    draw_all_windows();
-    draw_cursor();
+        drivers::Framebuffer::set_clip_rect(r);
+        draw_wallpaper();
+        draw_desktop_icons();
+        draw_mac_decorations();
+        draw_all_windows();
+        draw_cursor();
+    }
     drivers::Framebuffer::clear_clip_rect();
 
-    // 3. Copy only the specific dirty regions to VRAM and execute a single hardware page flip
+    // Copy only the specific dirty regions to VRAM and execute a single hardware page flip
     drivers::Framebuffer::swap_dirty_rects(list.rects, list.count);
 }
 
@@ -3741,6 +3754,10 @@ void WindowManager::tick() {
             redraw_dirty_rect(dirty);
         }
     }
+}
+
+bool WindowManager::is_drag_in_progress() {
+    return (active_window && (active_window->is_dragging || is_resizing_window)) || is_dragging_selection;
 }
 
 void WindowManager::handle_key_press(char c) {

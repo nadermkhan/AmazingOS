@@ -13,6 +13,11 @@ enum ThreadState {
     THREAD_TERMINATED
 };
 
+enum ThreadPriority {
+    PRIORITY_NORMAL = 0,
+    PRIORITY_HIGH = 1
+};
+
 struct Thread {
     uint64_t rsp;          // Offset 0: Saved stack pointer
     uint64_t id;           // Unique Thread ID
@@ -21,6 +26,7 @@ struct Thread {
     uint64_t rsp0;         // Top of kernel stack (for syscall RSP restore)
     Thread* next;          // Queue link
     Thread* all_next;      // Global list link
+    ThreadPriority priority; // Thread scheduling priority class
 
     static constexpr int MAX_FILE_DESCRIPTORS = 16;
     fs::File fd_pool[MAX_FILE_DESCRIPTORS];
@@ -62,5 +68,11 @@ void scheduler_unregister_thread(Thread* t);
 
 // Generate a unique thread ID
 uint64_t scheduler_generate_id();
+
+// GUI Thread priority/wake management helpers
+void scheduler_register_gui_thread(Thread* t);
+void scheduler_wake_gui_thread();
+void scheduler_set_gui_wake_tsc(uint64_t tsc);
+uint64_t scheduler_get_gui_wake_tsc();
 
 } // namespace kernel

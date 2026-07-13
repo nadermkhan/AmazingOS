@@ -304,12 +304,6 @@ void user_bootstrap_thread(void* arg) {
 
 volatile bool gui_demo_complete = false;
 
-inline uint64_t rdtsc() {
-    uint32_t low, high;
-    __asm__ __volatile__ ("rdtsc" : "=a"(low), "=d"(high));
-    return ((uint64_t)high << 32) | low;
-}
-
 static uint64_t calibrate_tsc() {
     // Enable PIT Channel 2 gate
     drivers::outb(0x61, (drivers::inb(0x61) & 0xFD) | 1);
@@ -338,6 +332,7 @@ static uint64_t calibrate_tsc() {
 // GUI Compositor & Window Manager verification thread
 void gui_demo_thread(void* arg) {
     (void)arg;
+    kernel::scheduler_register_gui_thread(kernel::scheduler_get_current());
 
     // 1. Wait briefly for other boot logs to settle on screen/serial
     for (volatile int delay = 0; delay < 10000000; ) {
@@ -472,6 +467,8 @@ void gui_demo_thread(void* arg) {
     bool deferred_mouse_pending = false;
     bool deferred_mouse_left = false;
     bool deferred_mouse_right = false;
+    char deferred_key_char = 0;
+    bool deferred_key_pending = false;
     int mouse_remainder_x = 0;
     int mouse_remainder_y = 0;
 
@@ -491,45 +488,97 @@ void gui_demo_thread(void* arg) {
         deferred_mouse_dy = 0;
         deferred_mouse_pending = false;
 
-        while (drivers::Ps2::poll_mouse(last_dx, last_dy, m_left, m_right)) {
-            accum_dx += last_dx;
-            accum_dy += last_dy;
-            any_left = m_left;
-            any_right = m_right;
-            got_packet = true;
-        }
+        bool drag_active = wm::WindowManager::is_drag_in_progress();
 
-        if (got_packet) {
-            int speed = (accum_dx < 0 ? -accum_dx : accum_dx) + (accum_dy < 0 ? -accum_dy : accum_dy);
-            int scale_num = 10;
-            if (speed > 16) {
-                scale_num = 14;
-            } else if (speed > 8) {
-                scale_num = 12;
+        if (drag_active) {
+            while (drivers::Ps2::poll_mouse(last_dx, last_dy, m_left, m_right)) {
+                accum_dx += last_dx;
+                accum_dy += last_dy;
+                any_left = m_left;
+                any_right = m_right;
+                got_packet = true;
             }
 
-            int scaled_dx = accum_dx * scale_num + mouse_remainder_x;
-            int scaled_dy = accum_dy * scale_num + mouse_remainder_y;
-            accum_dx = scaled_dx / 10;
-            accum_dy = scaled_dy / 10;
-            mouse_remainder_x = scaled_dx % 10;
-            mouse_remainder_y = scaled_dy % 10;
+            if (got_packet) {
+                int speed = (accum_dx < 0 ? -accum_dx : accum_dx) + (accum_dy < 0 ? -accum_dy : accum_dy);
+                int scale_num = 10;
+                if (speed > 16) {
+                    scale_num = 14;
+                } else if (speed > 8) {
+                    scale_num = 12;
+                }
 
-            cursor_x += accum_dx;
-            cursor_y -= accum_dy;
+                int scaled_dx = accum_dx * scale_num + mouse_remainder_x;
+                int scaled_dy = accum_dy * scale_num + mouse_remainder_y;
+                accum_dx = scaled_dx / 10;
+                accum_dy = scaled_dy / 10;
+                mouse_remainder_x = scaled_dx % 10;
+                mouse_remainder_y = scaled_dy % 10;
 
-            int width = drivers::Framebuffer::get_width();
-            int height = drivers::Framebuffer::get_height();
-            if (cursor_x < 0) cursor_x = 0;
-            if (cursor_x >= width) cursor_x = width - 1;
-            if (cursor_y < 0) cursor_y = 0;
-            if (cursor_y >= height) cursor_y = height - 1;
+                cursor_x += accum_dx;
+                cursor_y -= accum_dy;
 
-            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, any_left, any_right);
+                int width = drivers::Framebuffer::get_width();
+                int height = drivers::Framebuffer::get_height();
+                if (cursor_x < 0) cursor_x = 0;
+                if (cursor_x >= width) cursor_x = width - 1;
+                if (cursor_y < 0) cursor_y = 0;
+                if (cursor_y >= height) cursor_y = height - 1;
+
+                wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, any_left, any_right);
+            }
+        } else {
+            // Process each packet individually for ultra-smooth 100Hz hardware cursor tracking
+            int dx = accum_dx;
+            int dy = accum_dy;
+            bool left = any_left;
+            bool right = any_right;
+            bool first_packet = got_packet;
+
+            while (first_packet || drivers::Ps2::poll_mouse(dx, dy, left, right)) {
+                first_packet = false;
+                
+                int speed = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+                int scale_num = 10;
+                if (speed > 16) {
+                    scale_num = 14;
+                } else if (speed > 8) {
+                    scale_num = 12;
+                }
+
+                int scaled_dx = dx * scale_num + mouse_remainder_x;
+                int scaled_dy = dy * scale_num + mouse_remainder_y;
+                dx = scaled_dx / 10;
+                dy = scaled_dy / 10;
+                mouse_remainder_x = scaled_dx % 10;
+                mouse_remainder_y = scaled_dy % 10;
+
+                cursor_x += dx;
+                cursor_y -= dy;
+
+                int width = drivers::Framebuffer::get_width();
+                int height = drivers::Framebuffer::get_height();
+                if (cursor_x < 0) cursor_x = 0;
+                if (cursor_x >= width) cursor_x = width - 1;
+                if (cursor_y < 0) cursor_y = 0;
+                if (cursor_y >= height) cursor_y = height - 1;
+
+                wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, left, right);
+                wm::WindowManager::draw_desktop();
+            }
         }
-        
+
         // Poll keyboard characters
-        if (drivers::Ps2::poll_keyboard(key_char)) {
+        bool got_key = false;
+        if (deferred_key_pending) {
+            key_char = deferred_key_char;
+            deferred_key_pending = false;
+            got_key = true;
+        } else {
+            got_key = drivers::Ps2::poll_keyboard(key_char);
+        }
+
+        if (got_key) {
             drivers::Serial::print("[COMPOSITOR] Key typed: '");
             char str[2] = {key_char, '\0'};
             drivers::Serial::print(str);
@@ -546,21 +595,30 @@ void gui_demo_thread(void* arg) {
 
         wm::WindowManager::tick();
         wm::WindowManager::draw_desktop();
-        
-        // Wait out the remainder of our 16.6ms budget while batching input for the next frame.
-        uint64_t target_tsc = start_time + tsc_per_frame;
-        while (rdtsc() < target_tsc) {
-            kernel::schedule(); // Yield CPU cooperatively
 
-            // Coalesce wake-up input and present it on the next compositor tick.
-            int temp_dx = 0, temp_dy = 0;
-            while (drivers::Ps2::poll_mouse(temp_dx, temp_dy, m_left, m_right)) {
-                deferred_mouse_dx += temp_dx;
-                deferred_mouse_dy += temp_dy;
-                deferred_mouse_left = m_left;
-                deferred_mouse_right = m_right;
-                deferred_mouse_pending = true;
-            }
+        // Block until the next frame deadline or until mouse/keyboard input is received
+        uint64_t target_tsc = start_time + tsc_per_frame;
+        if (rdtsc() < target_tsc && !deferred_mouse_pending && !deferred_key_pending) {
+            kernel::scheduler_set_gui_wake_tsc(target_tsc);
+            kernel::Thread* current = kernel::scheduler_get_current();
+            current->state = kernel::THREAD_BLOCKED;
+            kernel::schedule();
+        }
+
+        // Harvest any input packets that accumulated during sleep
+        int temp_dx = 0, temp_dy = 0;
+        while (drivers::Ps2::poll_mouse(temp_dx, temp_dy, m_left, m_right)) {
+            deferred_mouse_dx += temp_dx;
+            deferred_mouse_dy += temp_dy;
+            deferred_mouse_left = m_left;
+            deferred_mouse_right = m_right;
+            deferred_mouse_pending = true;
+        }
+
+        char temp_key = 0;
+        if (drivers::Ps2::poll_keyboard(temp_key)) {
+            deferred_key_char = temp_key;
+            deferred_key_pending = true;
         }
     }
 }

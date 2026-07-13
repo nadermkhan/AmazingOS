@@ -61,6 +61,32 @@ static Thread* dequeue() {
     if (!run_queue_head) {
         return nullptr;
     }
+    
+    // Scan for the first PRIORITY_HIGH thread in the run queue
+    Thread* prev = nullptr;
+    Thread* curr = run_queue_head;
+    while (curr) {
+        if (curr->priority == PRIORITY_HIGH) {
+            // Remove curr from the queue
+            if (prev) {
+                prev->next = curr->next;
+                if (!curr->next) {
+                    run_queue_tail = prev;
+                }
+            } else {
+                run_queue_head = curr->next;
+                if (!run_queue_head) {
+                    run_queue_tail = nullptr;
+                }
+            }
+            curr->next = nullptr;
+            return curr;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+
+    // Default to enqueued head if no high-priority thread is ready
     Thread* t = run_queue_head;
     run_queue_head = run_queue_head->next;
     if (!run_queue_head) {
@@ -84,6 +110,7 @@ void scheduler_init() {
     main_thread.exit_status = 0;
     main_thread.parent_id = 0;
     main_thread.all_next = nullptr;
+    main_thread.priority = PRIORITY_NORMAL;
     all_threads_head = &main_thread;
 
     // Initialize file descriptor table for main thread
@@ -152,6 +179,7 @@ Thread* thread_create(void (*func)(void*), void* arg) {
     t->waiting_for_pid = 0;
     t->exit_status = 0;
     t->parent_id = 0;
+    t->priority = PRIORITY_NORMAL;
 
     // Initialize file descriptor table
     for (int i = 0; i < Thread::MAX_FILE_DESCRIPTORS; ++i) {
@@ -533,6 +561,31 @@ void scheduler_unregister_thread(Thread* t) {
 
 uint64_t scheduler_generate_id() {
     return next_thread_id++;
+}
+
+static Thread* gui_thread_ptr = nullptr;
+static uint64_t gui_thread_wake_tsc = 0;
+
+void scheduler_register_gui_thread(Thread* t) {
+    gui_thread_ptr = t;
+    if (t) {
+        t->priority = PRIORITY_HIGH;
+    }
+}
+
+void scheduler_wake_gui_thread() {
+    if (gui_thread_ptr && gui_thread_ptr->state == THREAD_BLOCKED) {
+        gui_thread_ptr->state = THREAD_RUNNABLE;
+        enqueue(gui_thread_ptr);
+    }
+}
+
+void scheduler_set_gui_wake_tsc(uint64_t tsc) {
+    gui_thread_wake_tsc = tsc;
+}
+
+uint64_t scheduler_get_gui_wake_tsc() {
+    return gui_thread_wake_tsc;
 }
 
 } // namespace kernel

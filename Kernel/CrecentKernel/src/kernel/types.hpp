@@ -36,3 +36,9 @@ template <typename T>
 inline T* phys_to_virt(uint64_t phys) {
     return (T*)(phys + VMM_DIRECT_MAP_OFFSET);
 }
+
+inline uint64_t rdtsc() {
+    uint32_t low, high;
+    __asm__ __volatile__ ("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+}

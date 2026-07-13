@@ -179,14 +179,26 @@ extern "C" __attribute__((sysv_abi)) void interrupt_handler(InterruptFrame* fram
         if (frame->int_no == 32) {
             // Acknowledge the hardware interrupt by writing EOI to the Local APIC
             drivers::Apic::eoi();
+            // Check if we need to wake the GUI thread because the deadline has passed
+            uint64_t wake_tsc = kernel::scheduler_get_gui_wake_tsc();
+            if (wake_tsc > 0) {
+                if (rdtsc() >= wake_tsc) {
+                    kernel::scheduler_set_gui_wake_tsc(0); // Reset
+                    kernel::scheduler_wake_gui_thread();
+                }
+            }
             // Invoke the scheduler to switch thread context
             kernel::schedule();
         } else if (frame->int_no == 33) {
             drivers::Ps2::handle_keyboard_interrupt();
+            kernel::scheduler_wake_gui_thread();
             drivers::Apic::eoi();
+            kernel::schedule();
         } else if (frame->int_no == 44) {
             drivers::Ps2::handle_mouse_interrupt();
+            kernel::scheduler_wake_gui_thread();
             drivers::Apic::eoi();
+            kernel::schedule();
         } else {
             // Log interrupt (IRQs and software interrupts)
             drivers::Serial::print("[INT] Captured Interrupt Vector: ");

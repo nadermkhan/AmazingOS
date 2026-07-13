@@ -129,6 +129,7 @@ public:
     static void handle_key_press(char c);
     static void tick();
     static void draw_settings_content(Window* win);
+    static bool is_drag_in_progress();
 
     static int get_mouse_x() { return mouse_x; }
     static int get_mouse_y() { return mouse_y; }
