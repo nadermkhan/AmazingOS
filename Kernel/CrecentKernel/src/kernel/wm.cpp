@@ -1,6 +1,7 @@
 #include "wm.hpp"
 #include "cursor_data.hpp"
 #include "fs/vfs.hpp"
+#include "kernel/scheduler.hpp"
 #include "../drivers/framebuffer.hpp"
 #include "../drivers/serial.hpp"
 #include "../drivers/ttf.hpp"
@@ -1563,7 +1564,12 @@ void WindowManager::minimize_window_animated(Window* win) {
         
         win->rect = {x, y, w, h};
         force_redraw_all();
-        for (volatile int d = 0; d < 8000000; ) { d = d + 1; }
+        for (volatile int d = 0; d < 8000000; ) {
+            d = d + 1;
+            if (d % 2000000 == 0) {
+                kernel::schedule();
+            }
+        }
     }
     
     win->rect = orig;
