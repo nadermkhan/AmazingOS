@@ -75,6 +75,7 @@ private:
     static void arrange_desktop();
     static void draw_menu_bar();
     static void draw_dock();
+    static void focus_or_create_app(const char* title, uint32_t bg_color, int w, int h);
     static void draw_menu();
     static void draw_window_shadow(const Rect& r, bool active, uint8_t alpha);
     static void draw_traffic_lights(Window* win, uint8_t alpha);

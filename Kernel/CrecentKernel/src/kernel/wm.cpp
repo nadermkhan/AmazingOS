@@ -30,9 +30,9 @@ static constexpr uint32_t C_FINDER       = 0x00FFFFFF;
 static constexpr uint32_t C_FOLDER       = 0x0000A2C9;
 static constexpr uint32_t C_FILE         = 0x00E0E0E0;
 
-static int MENU_BAR_HEIGHT   = 0;
+static int MENU_BAR_HEIGHT   = 28;
 static int TITLE_BAR_HEIGHT  = 30;
-static int TASKBAR_HEIGHT    = 40;
+static int TASKBAR_HEIGHT    = 88; // DOCK_HEIGHT (64) + DOCK_MARGIN_BOTTOM (24)
 static bool start_menu_active = false;
 static int TRAFFIC_Y         = 15;
 static int TRAFFIC_R         = 6;
@@ -422,43 +422,55 @@ void WindowManager::draw_window_shadow(const Rect& r, bool active, uint8_t alpha
 }
 
 void WindowManager::draw_traffic_lights(Window* win, uint8_t alpha) {
-    (void)alpha; // Draw them solid for crispness
+    (void)alpha; // Solid circles for crisp rendering
     int x = win->rect.x;
     int y = win->rect.y;
-    int w = win->rect.w;
     bool active = (win == active_window && !win->is_minimized);
 
-    // Button positions
-    int btn_size = 21;
-    int btn_y = y + 5;
-    int close_x = x + w - 24;
-    int max_x = x + w - 48;
-    int min_x = x + w - 72;
+    // Bounding box of the traffic lights cluster for hover detection
+    int x_min = x + 10;
+    int x_max = x + 62;
+    int y_min = y + 9;
+    int y_max = y + 21;
+    bool hovered = (mouse_x >= x_min && mouse_x <= x_max && mouse_y >= y_min && mouse_y <= y_max);
 
-    // 1. Minimize Button
-    uint32_t min_bg = active ? 0x003A80F2 : 0x009BB2D2;
-    drivers::Framebuffer::draw_rounded_rect_alpha(min_x, btn_y, btn_size, btn_size, 4, min_bg, 255);
-    drivers::Framebuffer::draw_rect_alpha(min_x + 1, btn_y + 1, btn_size - 2, 1, 0x007EAFFA, 255); // Top highlight
-    drivers::Framebuffer::draw_rect_alpha(min_x + 5, btn_y + 13, 11, 3, C_WHITE, 255); // Dash
+    // Button centers (y-centered in 30px title bar)
+    int cy = y + 15;
+    int red_cx = x + 16;
+    int yel_cx = x + 36;
+    int grn_cx = x + 56;
+    int r = 6; // 12px diameter
 
-    // 2. Maximize Button
-    uint32_t max_bg = active ? 0x003A80F2 : 0x009BB2D2;
-    drivers::Framebuffer::draw_rounded_rect_alpha(max_x, btn_y, btn_size, btn_size, 4, max_bg, 255);
-    drivers::Framebuffer::draw_rect_alpha(max_x + 1, btn_y + 1, btn_size - 2, 1, 0x007EAFFA, 255); // Top highlight
-    drivers::Framebuffer::draw_rect_alpha(max_x + 5, btn_y + 5, 11, 11, C_WHITE, 255);
-    drivers::Framebuffer::draw_rect_alpha(max_x + 6, btn_y + 7, 9, 8, max_bg, 255);
-    drivers::Framebuffer::draw_rect_alpha(max_x + 5, btn_y + 5, 11, 3, C_WHITE, 255);
+    // Colors
+    uint32_t c_red = 0x00FF5F56;
+    uint32_t c_yel = 0x00FFBD2E;
+    uint32_t c_grn = 0x0027C93F;
 
-    // 3. Close Button
-    uint32_t close_bg = active ? 0x00FF4B2B : 0x00E08080;
-    drivers::Framebuffer::draw_rounded_rect_alpha(close_x, btn_y, btn_size, btn_size, 4, close_bg, 255);
-    drivers::Framebuffer::draw_rect_alpha(close_x + 1, btn_y + 1, btn_size - 2, 1, 0x00FFA290, 255); // Top highlight
-    int cx = close_x + 10, cy = btn_y + 10;
-    for (int i = -4; i <= 4; i++) {
-        drivers::Framebuffer::draw_pixel(cx + i, cy + i, C_WHITE);
-        drivers::Framebuffer::draw_pixel(cx + i + 1, cy + i, C_WHITE);
-        drivers::Framebuffer::draw_pixel(cx + i, cy - i, C_WHITE);
-        drivers::Framebuffer::draw_pixel(cx + i + 1, cy - i, C_WHITE);
+    if (!active && !hovered) {
+        // Desaturate inactive windows
+        uint32_t inactive_c = dark_mode ? 0x004B5563 : 0x00D1D5DB;
+        c_red = inactive_c;
+        c_yel = inactive_c;
+        c_grn = inactive_c;
+    }
+
+    // Draw solid circles
+    drivers::Framebuffer::draw_circle_filled(red_cx, cy, r, c_red);
+    drivers::Framebuffer::draw_circle_filled(yel_cx, cy, r, c_yel);
+    drivers::Framebuffer::draw_circle_filled(grn_cx, cy, r, c_grn);
+
+    // Draw micro-symbols on hover
+    if (hovered) {
+        // Red button: x
+        drivers::Framebuffer::draw_line(red_cx - 2, cy - 2, red_cx + 2, cy + 2, 0x004C0000);
+        drivers::Framebuffer::draw_line(red_cx - 2, cy + 2, red_cx + 2, cy - 2, 0x004C0000);
+
+        // Yellow button: -
+        drivers::Framebuffer::draw_line(yel_cx - 3, cy, yel_cx + 3, cy, 0x004C3C00);
+
+        // Green button: +
+        drivers::Framebuffer::draw_line(grn_cx - 2, cy, grn_cx + 2, cy, 0x00003C00);
+        drivers::Framebuffer::draw_line(grn_cx, cy - 2, grn_cx, cy + 2, 0x00003C00);
     }
 }
 
@@ -469,43 +481,39 @@ void WindowManager::draw_window_body(Window* win, uint8_t alpha, bool is_termina
     uint8_t body_alpha = alpha; 
 
     bool active = (win == active_window && !win->is_minimized);
-    uint32_t border_c = active ? 0x001E56CF : 0x007E97B8;
-    uint32_t title_bg = active ? 0x00245EDB : 0x009BB2D2;
-    uint32_t title_highlight = active ? 0x003A80F2 : 0x00B5C9E5;
+    uint32_t border_c = dark_mode ? 0x00374151 : 0x00D1D5DB;
+    uint32_t title_bg = dark_mode ? 0x001F2937 : 0x00F3F4F6;
+    uint32_t divider_c = dark_mode ? 0x002D3748 : 0x00E5E7EB;
 
-    // Window frame (outer border - visual decoration)
-    drivers::Framebuffer::draw_rounded_rect_alpha(r.x, r.y, r.w, r.h, 6, border_c, alpha);
+    // 1. Draw Bounding Rounded Window Frame (Outer Border)
+    drivers::Framebuffer::draw_rounded_rect_alpha(r.x, r.y, r.w, r.h, CORNER_RADIUS, border_c, alpha);
     
-    // Draw top curved title bar
-    drivers::Framebuffer::draw_rounded_rect_alpha(r.x + 1, r.y + 1, r.w - 2, TITLE_BAR_HEIGHT, 6, title_bg, alpha);
-    drivers::Framebuffer::draw_rect_alpha(r.x + 1, r.y + 1, r.w - 2, 2, title_highlight, alpha); // top highlight line
-
-    // Left-aligned window icon
-    int icon_x = r.x + 8;
-    int icon_y = r.y + 7;
-    uint32_t icon_c = win->title_is("Terminal") ? 0x001A1A1A : 0x00FFFFFF;
-    drivers::Framebuffer::draw_rounded_rect_alpha(icon_x, icon_y, 16, 16, 4, icon_c, alpha);
+    // 2. Draw Title Bar (Rounded Top Corners, Flat Bottom)
+    drivers::Framebuffer::draw_rounded_rect_alpha(r.x + 1, r.y + 1, r.w - 2, TITLE_BAR_HEIGHT + CORNER_RADIUS, CORNER_RADIUS, title_bg, alpha);
     
-    float title_font = 14.0f;
-    draw_string(win->title, r.x + 30, r.y + 8, C_WHITE, title_font);
+    // 3. Draw Client Area (Rounded Bottom Corners, Flat Top)
+    int client_y = r.y + TITLE_BAR_HEIGHT;
+    int client_h = r.h - TITLE_BAR_HEIGHT - 1;
+    drivers::Framebuffer::draw_rounded_rect_alpha(r.x + 1, client_y, r.w - 2, client_h, CORNER_RADIUS, win->bg_color, body_alpha);
+    // Flatten top corners of the client area
+    drivers::Framebuffer::draw_rect_alpha(r.x + 1, client_y, r.w - 2, CORNER_RADIUS, win->bg_color, body_alpha);
 
-    // Draw buttons
+    // 4. Draw Header/Client Divider Line
+    drivers::Framebuffer::draw_rect_alpha(r.x + 1, client_y - 1, r.w - 2, 1, divider_c, alpha);
+
+    // 5. Centered Window Title Text
+    int tw = get_string_width(win->title, scale_font(14.0f));
+    int tx = r.x + (r.w - tw) / 2;
+    draw_string(win->title, tx, r.y + 8, C_TEXT, 14.0f);
+
+    // 6. Draw Traffic Light controls on top-left
     draw_traffic_lights(win, alpha);
 
-    // Client area and bottom frame decoration
-    drivers::Framebuffer::draw_rect_alpha(
-        r.x + 1, r.y + TITLE_BAR_HEIGHT, r.w - 2, r.h - TITLE_BAR_HEIGHT - 12,
-        win->bg_color, body_alpha);
-    
-    // Bottom border fill to cover the 12px height offset area
-    drivers::Framebuffer::draw_rect_alpha(
-        r.x + 1, r.y + r.h - 12, r.w - 2, 11, border_c, alpha);
-
-    // Resize grip affordance
+    // 7. Resize grip affordance (bottom-right corner)
     if (!win->is_maximized && !win->is_minimized) {
         int rx = r.x + r.w - 14;
         int ry = r.y + r.h - 14;
-        uint32_t grip_c = active ? 0x000F52BA : 0x00475569;
+        uint32_t grip_c = active ? (dark_mode ? 0x000A84FF : 0x000F52BA) : (dark_mode ? 0x004B5563 : 0x009CA3AF);
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j <= i; j++) {
                 drivers::Framebuffer::draw_pixel(rx + j*4, ry - (i-j)*4, grip_c);
@@ -1772,31 +1780,222 @@ void WindowManager::invalidate_window(int id) {
 // Menu bar
 // ---------------------------------------------------------------------------
 void WindowManager::draw_menu_bar() {
-    int w = drivers::Framebuffer::get_width();
-    drivers::Framebuffer::draw_rect_alpha(0, 0, w, MENU_BAR_HEIGHT, C_MENU_BG, 180);
-    drivers::Framebuffer::draw_rect_alpha(0, MENU_BAR_HEIGHT, w, 1, C_MENU_LINE, 180);
-
-    draw_string("Crecent", 18, 7, C_TEXT, 16.0f);
-    draw_string("Finder    File    Edit    View    Go    Window    Help", 90, 7, C_TEXT, 15.0f);
+    int w = (int)drivers::Framebuffer::get_width();
     
-    if (wifi_connected) {
-        draw_string("Wifi: On", w - 280, 7, 0x000F52BA, 14.0f);
-    } else {
-        draw_string("Wifi: Off", w - 280, 7, 0x00808080, 14.0f);
-    }
+    // 1. Translucent background and border
+    drivers::Framebuffer::draw_rect_alpha(0, 0, w, MENU_BAR_HEIGHT, C_MENU_BG, 200);
+    drivers::Framebuffer::draw_rect_alpha(0, MENU_BAR_HEIGHT - 1, w, 1, C_MENU_LINE, 200);
 
-    if (usb_connected) {
-        draw_string("USB: Mounted", w - 190, 7, 0x0034A853, 14.0f);
-    } else {
-        draw_string("USB: Off", w - 190, 7, 0x00808080, 14.0f);
-    }
+    // 2. Procedural Vector Apple Logo
+    int ax = 16, ay = 14;
+    drivers::Framebuffer::draw_circle_filled(ax, ay, 5, C_TEXT); // Left lobe
+    drivers::Framebuffer::draw_circle_filled(ax + 5, ay, 5, C_TEXT); // Right lobe
+    drivers::Framebuffer::draw_circle_filled(ax + 2, ay - 6, 2, C_TEXT); // Leaf
+    drivers::Framebuffer::draw_circle_filled(ax + 8, ay - 1, 2, C_MENU_BG); // Bite overlay (alpha 255)
 
-    draw_string("Wed 14:35", w - 100, 7, C_TEXT, 15.0f);
+    // 3. Menu items
+    draw_string("Finder    File    Edit    View    Go    Window    Help", 42, 7, C_TEXT, 14.0f);
+    
+    // 4. WiFi Icon
+    int wx = w - 210;
+    int wy = 14;
+    uint32_t wifi_c = wifi_connected ? (dark_mode ? 0x000A84FF : 0x000F52BA) : 0x008E8E93;
+    
+    // Render Concentric WiFi Arcs
+    drivers::Framebuffer::draw_circle_filled(wx, wy, 9, wifi_c);
+    drivers::Framebuffer::draw_circle_filled(wx, wy, 7, C_MENU_BG);
+    drivers::Framebuffer::draw_circle_filled(wx, wy, 5, wifi_c);
+    drivers::Framebuffer::draw_circle_filled(wx, wy, 3, C_MENU_BG);
+    drivers::Framebuffer::draw_circle_filled(wx, wy, 1, wifi_c);
+    // Cover bottom half
+    drivers::Framebuffer::draw_rect_alpha(wx - 10, wy + 1, 20, 10, C_MENU_BG, 255);
+
+    // 5. Battery Icon
+    int bx = w - 170;
+    int by = 8;
+    uint32_t bat_rim = C_TEXT;
+    uint32_t bat_level = usb_connected ? 0x0030D158 : (dark_mode ? 0x00FFD60A : 0x00FF9F0A); // Green if charging, orange otherwise
+    
+    drivers::Framebuffer::draw_rounded_rect_alpha(bx, by, 20, 11, 3, bat_rim, 255);
+    drivers::Framebuffer::draw_rect_alpha(bx + 1, by + 1, 18, 9, C_MENU_BG, 255);
+    drivers::Framebuffer::draw_rect_alpha(bx + 20, by + 3, 2, 5, bat_rim, 255); // battery nub
+    drivers::Framebuffer::draw_rect_alpha(bx + 3, by + 3, 12, 5, bat_level, 255); // 70% level
+
+    // 6. Time String
+    draw_string("Wed 14:35", w - 120, 7, C_TEXT, 14.0f);
 }
 
-// ---------------------------------------------------------------------------
-// Dock
-// ---------------------------------------------------------------------------
+
+
+void WindowManager::focus_or_create_app(const char* title, uint32_t bg_color, int w, int h) {
+    for (Window* curr = window_list_head; curr; curr = curr->next) {
+        if (curr->title_is(title)) {
+            curr->is_minimized = false;
+            focus_window(curr);
+            force_redraw_all();
+            return;
+        }
+    }
+    int width = (int)drivers::Framebuffer::get_width();
+    int height = (int)drivers::Framebuffer::get_height();
+    int wx = (width - w) / 2;
+    int wy = MENU_BAR_HEIGHT + (height - MENU_BAR_HEIGHT - TASKBAR_HEIGHT - h) / 2;
+    if (wy < MENU_BAR_HEIGHT) wy = MENU_BAR_HEIGHT + 10;
+    create_window(wx, wy, w, h, title, bg_color);
+    force_redraw_all();
+}
+
+void WindowManager::draw_dock() {
+    int screen_w = (int)drivers::Framebuffer::get_width();
+    int screen_h = (int)drivers::Framebuffer::get_height();
+
+    int dx = (screen_w - DOCK_WIDTH) / 2;
+    int dy = screen_h - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+
+    // 1. Draw Translucent Dock Container
+    drivers::Framebuffer::draw_rounded_rect_alpha(dx, dy, DOCK_WIDTH, DOCK_HEIGHT, 16, C_DOCK_BG, 190);
+    drivers::Framebuffer::draw_rounded_rect_alpha(dx, dy, DOCK_WIDTH, DOCK_HEIGHT, 16, C_DOCK_RIM, 90);
+
+    // 2. Centered App Icons
+    const char* app_names[] = {"Finder", "Safari", "Terminal", "Notes", "System Settings"};
+    int gap = (int)(16 * ui_scale);
+    int icon_size = DOCK_ICON_SIZE;
+    int total_icons_w = 5 * icon_size + 4 * gap;
+    int start_x = dx + (DOCK_WIDTH - total_icons_w) / 2;
+
+    int hovered_idx = -1;
+    int hover_ix = 0, hover_iy = 0, hover_iw = 0;
+
+    for (int i = 0; i < 5; ++i) {
+        int ix = start_x + i * (icon_size + gap);
+        int iy = dy + (DOCK_HEIGHT - icon_size) / 2;
+        int iw = icon_size;
+        int ih = icon_size;
+
+        // Check hover magnification state
+        bool is_hovered = (mouse_x >= ix && mouse_x < ix + icon_size && mouse_y >= dy && mouse_y < dy + DOCK_HEIGHT);
+        if (is_hovered) {
+            hovered_idx = i;
+            iw = (int)(icon_size * 1.15f);
+            ih = (int)(icon_size * 1.15f);
+            iy = dy + (DOCK_HEIGHT - ih) / 2 - (int)(6 * ui_scale);
+            ix = ix - (iw - icon_size) / 2;
+            
+            // Save hovered coords to draw tooltip on top after drawing all icons
+            hover_ix = ix;
+            hover_iy = iy;
+            hover_iw = iw;
+        }
+
+        // Draw Icons
+        if (i == 0) {
+            // Finder: split light blue / dark blue face
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy, iw, ih, 10, 0x005AC8FA, 255);
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix + iw/2, iy, iw/2, ih, 10, 0x00007AFF, 255);
+            drivers::Framebuffer::draw_rect_alpha(ix + iw/2, iy, 4, ih, 0x00007AFF, 255); // Overwrite middle rounding gap
+            
+            // Nose, eyes, and smile
+            int cx = ix + iw/2;
+            int cy = iy + ih/2;
+            drivers::Framebuffer::draw_line(cx, cy - ih/6, cx, cy + ih/6, 0x001C1C1E); // Nose line
+            drivers::Framebuffer::draw_line(cx, cy + ih/6, cx - iw/8, cy + ih/6 + iw/12, 0x001C1C1E);
+            drivers::Framebuffer::draw_line(cx - iw/8, cy + ih/6 + iw/12, cx, cy + ih/6 + iw/12, 0x001C1C1E);
+            
+            drivers::Framebuffer::draw_circle_filled(ix + iw/3, iy + ih/3 + 2, 3, 0x001C1C1E); // Left eye
+            drivers::Framebuffer::draw_circle_filled(ix + 2*iw/3, iy + ih/3 + 2, 3, 0x001C1C1E); // Right eye
+            
+            // Smile
+            drivers::Framebuffer::draw_line(ix + iw/4 + 2, iy + 2*ih/3, ix + 3*iw/4 - 2, iy + 2*ih/3, 0x001C1C1E);
+        }
+        else if (i == 1) {
+            // Safari: blue/white compass
+            int cx = ix + iw/2;
+            int cy = iy + ih/2;
+            drivers::Framebuffer::draw_circle_filled(cx, cy, iw/2 - 2, 0x00FFFFFF);
+            drivers::Framebuffer::draw_circle_filled(cx, cy, iw/2 - 4, 0x000A84FF); // Bright macOS Blue
+            
+            // Needle
+            int len = iw/2 - 6;
+            drivers::Framebuffer::draw_line(cx, cy, cx + len/2, cy - len/2, 0x00FF453A); // Red dial half
+            drivers::Framebuffer::draw_line(cx, cy, cx - len/2, cy + len/2, 0x00F2F2F7); // White dial half
+        }
+        else if (i == 2) {
+            // Terminal: dark slate rounded rectangle with prompt symbols
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy, iw, ih, 10, 0x001C1C1E, 255);
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy, iw, ih, 10, 0x0048484A, 120); // Border rim
+            
+            // Prompt >
+            drivers::Framebuffer::draw_line(ix + iw/6, iy + ih/3, ix + iw/3, iy + ih/2, 0x0030D158); // Green prompt
+            drivers::Framebuffer::draw_line(ix + iw/3, iy + ih/2, ix + iw/6, iy + 2*ih/3, 0x0030D158);
+            // Cursor block
+            drivers::Framebuffer::draw_rect_alpha(ix + iw/3 + 4, iy + ih/2 + 2, iw/6, 3, 0x00FFFFFF, 255);
+        }
+        else if (i == 3) {
+            // Notes: yellow header, cream sheet lines
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy, iw, ih, 10, 0x00FFFDD0, 255);
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy, iw, ih/4 + 4, 10, 0x00FF9F0A, 255); // Orange top band
+            drivers::Framebuffer::draw_rect_alpha(ix, iy + ih/4, iw, 4, 0x00FF9F0A, 255);
+            
+            // Ruled lines
+            drivers::Framebuffer::draw_line(ix + 6, iy + ih/2, ix + iw - 6, iy + ih/2, 0x00E5E5EA);
+            drivers::Framebuffer::draw_line(ix + 6, iy + ih/2 + 6, ix + iw - 6, iy + ih/2 + 6, 0x00E5E5EA);
+            drivers::Framebuffer::draw_line(ix + 6, iy + ih/2 + 12, ix + iw - 6, iy + ih/2 + 12, 0x00E5E5EA);
+        }
+        else if (i == 4) {
+            // System Settings: grey background with gear teeth circles
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy, iw, ih, 10, 0x008E8E93, 255);
+            drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy, iw, ih, 10, 0x00AEAEB2, 120);
+            
+            int cx = ix + iw/2;
+            int cy = iy + ih/2;
+            drivers::Framebuffer::draw_circle_filled(cx, cy, iw/4, 0x00E5E7EB);
+            drivers::Framebuffer::draw_circle_filled(cx, cy, iw/8, 0x008E8E93);
+            
+            // Gear teeth
+            for (int a = 0; a < 8; a++) {
+                int ox = 0, oy = 0;
+                int r_val = iw/3;
+                if (a == 0) { ox = 0; oy = -r_val; }
+                else if (a == 1) { ox = (int)(r_val * 0.7f); oy = -(int)(r_val * 0.7f); }
+                else if (a == 2) { ox = r_val; oy = 0; }
+                else if (a == 3) { ox = (int)(r_val * 0.7f); oy = (int)(r_val * 0.7f); }
+                else if (a == 4) { ox = 0; oy = r_val; }
+                else if (a == 5) { ox = -(int)(r_val * 0.7f); oy = (int)(r_val * 0.7f); }
+                else if (a == 6) { ox = -r_val; oy = 0; }
+                else if (a == 7) { ox = -(int)(r_val * 0.7f); oy = -(int)(r_val * 0.7f); }
+                drivers::Framebuffer::draw_circle_filled(cx + ox, cy + oy, 3, 0x00E5E7EB);
+            }
+        }
+
+        // Draw Active App Dot Indicator
+        bool app_running = false;
+        for (Window* w = window_list_head; w; w = w->next) {
+            if (w->title_is(app_names[i])) {
+                app_running = true;
+                break;
+            }
+        }
+        if (app_running) {
+            int dot_x = ix + iw/2;
+            int dot_y = dy + DOCK_HEIGHT - 6;
+            drivers::Framebuffer::draw_circle_filled(dot_x, dot_y, 2, dark_mode ? 0x00FFFFFF : 0x001C1C1E);
+        }
+    }
+
+    // 3. Draw tooltip above the hovered icon (ensuring it renders on top of adjacent icons)
+    if (hovered_idx >= 0) {
+        const char* label = app_names[hovered_idx];
+        int tw = get_string_width(label, scale_font(12.0f));
+        int t_w = tw + 16;
+        int t_h = (int)(20 * ui_scale);
+        int t_x = hover_ix + hover_iw / 2 - t_w / 2;
+        int t_y = hover_iy - t_h - 4;
+
+        drivers::Framebuffer::draw_rounded_rect_alpha(t_x, t_y, t_w, t_h, 6, dark_mode ? 0x001E293B : 0x001C1C1E, 220);
+        draw_string(label, t_x + 8, t_y + (t_h - (int)(12 * ui_scale))/2, 0x00FFFFFF, 12.0f);
+    }
+}
+
 void WindowManager::draw_taskbar() {
     int width = drivers::Framebuffer::get_width();
     int height = drivers::Framebuffer::get_height();
@@ -2085,20 +2284,19 @@ void WindowManager::draw_mac_decorations() {
     int screen_w = (int)drivers::Framebuffer::get_width();
     int screen_h = (int)drivers::Framebuffer::get_height();
 
-    // Taskbar is at the bottom
-    Rect taskbar_rect = {0, screen_h - TASKBAR_HEIGHT, screen_w, TASKBAR_HEIGHT};
-    if (clip.intersects(taskbar_rect)) {
-        draw_taskbar();
+    // Top Menu Bar
+    Rect menu_bar_rect = {0, 0, screen_w, MENU_BAR_HEIGHT};
+    if (clip.intersects(menu_bar_rect)) {
+        draw_menu_bar();
     }
 
-    // Start Menu
-    if (start_menu_active) {
-        Rect start_menu_rect = {0, screen_h - TASKBAR_HEIGHT - 450, 380, 450};
-        if (clip.intersects(start_menu_rect)) {
-            draw_start_menu();
-        }
+    // Bottom Centered Dock
+    Rect dock_rect = {(screen_w - DOCK_WIDTH) / 2, screen_h - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM, DOCK_WIDTH, DOCK_HEIGHT};
+    if (clip.intersects(dock_rect)) {
+        draw_dock();
     }
 
+    // Context Menus (including Apple menu and desktop right-clicks)
     if (active_menu.active) {
         Rect menu_rect = {active_menu.x, active_menu.y, active_menu.w, active_menu.h};
         if (clip.intersects(menu_rect)) {
@@ -2382,7 +2580,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                 active_window->is_maximized = false;
                             } else {
                                 active_window->orig_rect = active_window->rect;
-                                active_window->rect = {0, 0, width, height - TASKBAR_HEIGHT};
+                                active_window->rect = {0, MENU_BAR_HEIGHT, width, height - TASKBAR_HEIGHT - MENU_BAR_HEIGHT};
                                 active_window->is_maximized = true;
                             }
                         }
@@ -2591,45 +2789,45 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
             }
             state_updated = true;
         } else if (new_y <= MENU_BAR_HEIGHT) {
-            if (new_x >= 10 && new_x <= 80) { // Crecent
+            if (new_x >= 10 && new_x <= 35) { // Apple Logo
                 active_menu = {true, 10, MENU_BAR_HEIGHT, MENU_WIDTH, 3 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 0, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= 85 && new_x <= 135) { // Finder
-                active_menu = {true, 85, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 1, -1};
+            } else if (new_x >= 40 && new_x <= 90) { // Finder
+                active_menu = {true, 40, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 1, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= 145 && new_x <= 185) { // File
-                active_menu = {true, 145, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 3, -1};
+            } else if (new_x >= 95 && new_x <= 130) { // File
+                active_menu = {true, 95, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 3, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= 185 && new_x <= 225) { // Edit
-                active_menu = {true, 185, MENU_BAR_HEIGHT, MENU_WIDTH, 4 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 4, -1};
+            } else if (new_x >= 135 && new_x <= 170) { // Edit
+                active_menu = {true, 135, MENU_BAR_HEIGHT, MENU_WIDTH, 4 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 4, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= 225 && new_x <= 270) { // View
-                active_menu = {true, 225, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 5, -1};
+            } else if (new_x >= 175 && new_x <= 210) { // View
+                active_menu = {true, 175, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 5, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= 270 && new_x <= 305) { // Go
-                active_menu = {true, 270, MENU_BAR_HEIGHT, MENU_WIDTH, 4 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 6, -1};
+            } else if (new_x >= 215 && new_x <= 245) { // Go
+                active_menu = {true, 215, MENU_BAR_HEIGHT, MENU_WIDTH, 4 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 6, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= 305 && new_x <= 365) { // Window
-                active_menu = {true, 305, MENU_BAR_HEIGHT, MENU_WIDTH, 3 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 7, -1};
+            } else if (new_x >= 250 && new_x <= 300) { // Window
+                active_menu = {true, 250, MENU_BAR_HEIGHT, MENU_WIDTH, 3 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 7, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= 365 && new_x <= 410) { // Help
-                active_menu = {true, 365, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 8, -1};
+            } else if (new_x >= 305 && new_x <= 345) { // Help
+                active_menu = {true, 305, MENU_BAR_HEIGHT, MENU_WIDTH, 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING, 8, -1};
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= width - 280 && new_x <= width - 210) { // Wifi toggle
+            } else if (new_x >= width - 220 && new_x <= width - 190) { // Wifi toggle
                 wifi_connected = !wifi_connected;
                 drivers::Serial::print("[WIFI] Status changed: ");
                 drivers::Serial::println(wifi_connected ? "Enabled. Connected to CrecentSecure_5G." : "Disabled.");
                 force_redraw_all();
                 state_updated = true;
-            } else if (new_x >= width - 190 && new_x <= width - 110) { // USB toggle
+            } else if (new_x >= width - 180 && new_x <= width - 130) { // USB toggle
                 usb_connected = !usb_connected;
                 drivers::Serial::print("[USB] Status changed: ");
                 if (usb_connected) {
@@ -2677,19 +2875,18 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                     click_start_y = new_y;
                     focus_window(clicked);
                     force_redraw_all();
-                } else if (in_rect(new_x, new_y, wx + clicked->rect.w - 24, wy + 5, 21, 21)) {
+                } else if (in_rect(new_x, new_y, wx + 16 - 7, wy + 15 - 7, 14, 14)) {
                     close_window(clicked->id);
                     force_redraw_all();
-                } else if (in_rect(new_x, new_y, wx + clicked->rect.w - 72, wy + 5, 21, 21)) {
-                    clicked->is_minimized = true;
-                    force_redraw_all();
-                } else if (in_rect(new_x, new_y, wx + clicked->rect.w - 48, wy + 5, 21, 21)) {
+                } else if (in_rect(new_x, new_y, wx + 36 - 7, wy + 15 - 7, 14, 14)) {
+                    minimize_window_animated(clicked);
+                } else if (in_rect(new_x, new_y, wx + 56 - 7, wy + 15 - 7, 14, 14)) {
                     if (clicked->is_maximized) {
                         clicked->rect = clicked->orig_rect;
                         clicked->is_maximized = false;
                     } else {
                         clicked->orig_rect = clicked->rect;
-                        clicked->rect = {0, 0, width, height - TASKBAR_HEIGHT};
+                        clicked->rect = {0, MENU_BAR_HEIGHT, width, height - TASKBAR_HEIGHT - MENU_BAR_HEIGHT};
                         clicked->is_maximized = true;
                     }
                     focus_window(clicked);
@@ -3123,31 +3320,34 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                 force_redraw_all();
                 state_updated = true;
             } else if (new_y >= height - TASKBAR_HEIGHT) {
-                // Taskbar Click
-                if (new_x >= 0 && new_x <= 100) {
-                    // Start Button clicked!
-                    start_menu_active = !start_menu_active;
-                } else if (new_x > 100 && new_x < width - 110) {
-                    // Open window tabs
-                    int tab_idx = 0;
-                    Window* clicked_tab_win = nullptr;
-                    for (Window* w = window_list_head; w; w = w->next) {
-                        int tab_x = 110 + tab_idx * 135;
-                        if (new_x >= tab_x && new_x < tab_x + 130) {
-                            clicked_tab_win = w;
+                // Dock Click
+                int dx = (width - DOCK_WIDTH) / 2;
+                int dy = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+                if (new_x >= dx && new_x < dx + DOCK_WIDTH && new_y >= dy && new_y < dy + DOCK_HEIGHT) {
+                    int gap = (int)(16 * ui_scale);
+                    int icon_size = DOCK_ICON_SIZE;
+                    int total_icons_w = 5 * icon_size + 4 * gap;
+                    int start_x = dx + (DOCK_WIDTH - total_icons_w) / 2;
+
+                    int clicked_idx = -1;
+                    for (int i = 0; i < 5; i++) {
+                        int ix = start_x + i * (icon_size + gap);
+                        if (new_x >= ix && new_x < ix + icon_size) {
+                            clicked_idx = i;
                             break;
                         }
-                        tab_idx++;
                     }
-                    if (clicked_tab_win) {
-                        if (clicked_tab_win->is_minimized) {
-                            clicked_tab_win->is_minimized = false;
-                            focus_window(clicked_tab_win);
-                        } else if (active_window == clicked_tab_win) {
-                            clicked_tab_win->is_minimized = true;
-                        } else {
-                            focus_window(clicked_tab_win);
-                        }
+
+                    if (clicked_idx == 0) {
+                        focus_or_create_app("Finder", C_FINDER, 500, 350);
+                    } else if (clicked_idx == 1) {
+                        focus_or_create_app("Safari", 0x00FFFFFF, 800, 550);
+                    } else if (clicked_idx == 2) {
+                        focus_or_create_app("Terminal", C_TERMINAL, 600, 400);
+                    } else if (clicked_idx == 3) {
+                        focus_or_create_app("Notes", 0x00FFFDD0, 450, 350);
+                    } else if (clicked_idx == 4) {
+                        focus_or_create_app("System Settings", 0x00FFFFFF, 500, 420);
                     }
                 }
                 force_redraw_all();
@@ -3639,14 +3839,14 @@ void WindowManager::set_ui_scale(float scale) {
     ui_scale = scale;
     
     // Scale layout parameters
-    MENU_BAR_HEIGHT   = 0;
+    MENU_BAR_HEIGHT   = (int)(28 * scale);
     TITLE_BAR_HEIGHT  = (int)(30 * scale);
-    TASKBAR_HEIGHT    = (int)(40 * scale);
     DOCK_HEIGHT       = (int)(64 * scale);
     DOCK_ICON_SIZE    = (int)(48 * scale);
     DOCK_ICON_SPACING = (int)(36 * scale);
     DOCK_MARGIN_BOTTOM = (int)(24 * scale);
-    DOCK_WIDTH        = (int)(640 * scale);
+    DOCK_WIDTH        = (int)(380 * scale);
+    TASKBAR_HEIGHT    = DOCK_HEIGHT + DOCK_MARGIN_BOTTOM;
     
     // Scale all open window sizes and positions
     int width = (int)drivers::Framebuffer::get_width();
