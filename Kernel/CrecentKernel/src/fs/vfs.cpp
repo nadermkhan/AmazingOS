@@ -1,4 +1,7 @@
 #include "vfs.hpp"
+#include "exfat.hpp"
+#include "../kernel/heap.hpp"
+#include "../drivers/serial.hpp"
 
 namespace fs {
 
@@ -144,6 +147,15 @@ const char* VFS::parse_filename(const char* path) {
 VFSNode* VFS::open(const char* path) {
     if (!path || path[0] == '\0') return nullptr;
 
+    // Check RAM Overlay first
+    const char* rel_path = path;
+    if (path[0] == '/') rel_path = path + 1;
+    for (size_t i = 0; i < node_count; ++i) {
+        if (str_equal(child_nodes[i].name, rel_path)) {
+            return &child_nodes[i];
+        }
+    }
+
     // 1. Longest-prefix mount point match
     int matched_idx = -1;
     size_t longest_len = 0;
@@ -226,6 +238,54 @@ ssize_t VFS::read(File* file, void* buffer, size_t count) {
 ssize_t VFS::write(File* file, const void* buffer, size_t count) {
     if (!file || !file->node || !buffer) return -1;
     if (!file->node->write) return -1;
+
+    // Check if we need to promote an exFAT file to RAM CoW overlay
+    if (file->node->read == Exfat::read) {
+        if (file->offset + count > file->node->size) {
+            drivers::Serial::println("[VFS] Resizing exFAT file. Promoting to RAM Copy-on-Write overlay.");
+            
+            // 1. Allocate buffer for new capacity
+            size_t new_capacity = file->offset + count;
+            if (new_capacity < 4096) new_capacity = 4096;
+            char* ram_buf = (char*)kernel::kmalloc(new_capacity);
+            if (!ram_buf) {
+                drivers::Serial::println("[VFS] Error: Failed to allocate CoW buffer.");
+                return -1;
+            }
+
+            // 2. Read existing content from exFAT
+            size_t old_size = file->node->size;
+            if (old_size > 0) {
+                ssize_t read_bytes = file->node->read(file->node, 0, ram_buf, old_size);
+                if (read_bytes != (ssize_t)old_size) {
+                    drivers::Serial::println("[VFS] Error: Failed to read old exFAT file contents.");
+                    kernel::kfree(ram_buf);
+                    return -1;
+                }
+            }
+
+            // 3. Construct absolute path for the RAM overlay node: "/disk/" + node->name
+            char vfs_path[256] = "/disk/";
+            size_t o_idx = 6;
+            size_t n_idx = 0;
+            while (file->node->name[n_idx] && o_idx < 250) {
+                vfs_path[o_idx++] = file->node->name[n_idx++];
+            }
+            vfs_path[o_idx] = '\0';
+
+            // 4. Create RAM node in VFS (registers under the overlay path)
+            VFSNode* ram_node = create_file(vfs_path, ram_buf, new_capacity);
+            if (!ram_node) {
+                drivers::Serial::println("[VFS] Error: Failed to register CoW node.");
+                kernel::kfree(ram_buf);
+                return -1;
+            }
+            ram_node->size = old_size;
+
+            // 5. Update File handle to point to the new RAM node
+            file->node = ram_node;
+        }
+    }
 
     ssize_t bytes = file->node->write(file->node, file->offset, buffer, count);
     if (bytes > 0) {

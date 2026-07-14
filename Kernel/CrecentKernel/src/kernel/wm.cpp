@@ -2,6 +2,7 @@
 #include "cursor_data.hpp"
 #include "fs/vfs.hpp"
 #include "kernel/scheduler.hpp"
+#include "kernel/heap.hpp"
 #include "../drivers/framebuffer.hpp"
 #include "../drivers/serial.hpp"
 #include "../drivers/ttf.hpp"
@@ -22,6 +23,9 @@ static uint32_t C_MENU_BG      = 0x00F5F5F5;
 static uint32_t C_MENU_LINE    = 0x00D2D2D2;
 static uint32_t C_DOCK_BG      = 0x00EBEBEB;
 static uint32_t C_DOCK_RIM     = 0x00FFFFFF;
+static uint32_t C_BORDER       = 0x00D1D5DB;
+static uint32_t C_TITLE_BG     = 0x00F3F4F6;
+static uint32_t C_DIVIDER      = 0x00E5E7EB;
 static constexpr uint32_t C_HOVER        = 0x000F52BA;
 static constexpr uint32_t C_CLOSE        = 0x00FF5F56;
 static constexpr uint32_t C_MINIMIZE     = 0x00FFBD2E;
@@ -30,6 +34,8 @@ static constexpr uint32_t C_TERMINAL     = 0x001A1A1A;
 static constexpr uint32_t C_FINDER       = 0x00FFFFFF;
 static constexpr uint32_t C_FOLDER       = 0x0000A2C9;
 static constexpr uint32_t C_FILE         = 0x00E0E0E0;
+
+static void draw_vector_icon(const char* name, int x, int y, int size, bool is_directory, bool is_terminal, bool selected);
 
 static int MENU_BAR_HEIGHT   = 28;
 static int TITLE_BAR_HEIGHT  = 30;
@@ -71,6 +77,7 @@ static int safari_link_count = 0;
 
 static int clipboard_item_idx = -1;
 static bool clipboard_is_cut = false;
+static char clipboard_path[256] = "";
 static bool is_renaming_item = false;
 
 static uint32_t last_finder_click_time = 0;
@@ -195,7 +202,21 @@ static bool str_equal(const char* s1, const char* s2) {
     }
     return *s1 == *s2;
 }
+static int str_len(const char* s) {
+    if (!s) return 0;
+    int len = 0;
+    while (s[len]) len++;
+    return len;
+}
 
+static void str_copy(char* dest, const char* src, size_t max_len) {
+    if (!dest || !src) return;
+    size_t i = 0;
+    for (; i < max_len - 1 && src[i] != '\0'; ++i) {
+        dest[i] = src[i];
+    }
+    dest[i] = '\0';
+}
 static Rect union_rects(const Rect& a, const Rect& b) {
     int x1 = a.x < b.x ? a.x : b.x;
     int y1 = a.y < b.y ? a.y : b.y;
@@ -269,6 +290,49 @@ static void add_item(const char* name, bool is_dir, bool is_term, const char* pa
     it.x = x;
     it.y = y;
     it.selected = false;
+
+    // Create the file in VFS if it doesn't exist
+    char vfs_path[256];
+    if (str_equal(path, "Desktop")) {
+        str_copy(vfs_path, "/Desktop/", 256);
+    } else if (str_equal(path, "Documents")) {
+        str_copy(vfs_path, "/Documents/", 256);
+    } else if (str_equal(path, "Applications")) {
+        str_copy(vfs_path, "/Applications/", 256);
+    } else {
+        str_copy(vfs_path, path, 256);
+        size_t len = str_len(vfs_path);
+        if (len > 0 && vfs_path[len - 1] != '/') {
+            vfs_path[len] = '/';
+            vfs_path[len + 1] = '\0';
+        }
+    }
+    size_t len = str_len(vfs_path);
+    str_copy(vfs_path + len, name, 256 - len);
+
+    if (!fs::VFS::open(vfs_path)) {
+        if (is_dir) {
+            fs::VFSNode* n = fs::VFS::create_file(vfs_path, nullptr, 0);
+            if (n) n->type = fs::NodeType::DIRECTORY;
+        } else {
+            char* buf = (char*)kernel::kmalloc(4096);
+            if (buf) {
+                buf[0] = '\0';
+                if (str_equal(name, "hello.txt")) {
+                    str_copy(buf, "TarFS validation hello world message!\n", 4096);
+                } else if (str_equal(name, "info.txt")) {
+                    str_copy(buf, "Hierarchical directories in TarFS are fully working.\n", 4096);
+                } else if (str_equal(name, "System Log.txt")) {
+                    str_copy(buf, "Crecent OS Kernel System Log initialized.", 4096);
+                }
+                fs::VFSNode* n = fs::VFS::create_file(vfs_path, buf, 4096);
+                if (n) {
+                    n->type = fs::NodeType::FILE;
+                    n->size = str_len(buf);
+                }
+            }
+        }
+    }
 }
 
 void WindowManager::trigger_host_persist() {
@@ -282,7 +346,15 @@ void WindowManager::trigger_host_persist() {
     drivers::Serial::println(f_buf);
     
     drivers::Serial::print("THEME ");
-    drivers::Serial::println(dark_mode ? "DARK" : "LIGHT");
+    if (current_theme == 1) {
+        drivers::Serial::println("DARK");
+    } else if (current_theme == 2) {
+        drivers::Serial::println("NORD");
+    } else if (current_theme == 3) {
+        drivers::Serial::println("WARM");
+    } else {
+        drivers::Serial::println("LIGHT");
+    }
     
     drivers::Serial::print("WALLPAPER ");
     int_to_str(wallpaper_theme_id, f_buf, 10);
@@ -349,13 +421,15 @@ bool WindowManager::right_mouse_pressed = false;
 Window* WindowManager::active_window = nullptr;
 int WindowManager::drag_offset_x = 0;
 int WindowManager::drag_offset_y = 0;
-ContextMenu WindowManager::active_menu = {false, 0, 0, 0, 0, 0, -1};
+ContextMenu WindowManager::active_menu = {false, 0, 0, 0, 0, -1, -1};
+SubMenu WindowManager::active_submenu = {false, 0, 0, 0, 0, -1, -1};
 int WindowManager::perf_cpu_history[20] = {0};
 int WindowManager::perf_current_cpu = 12;
 int WindowManager::frame_counter = 0;
 float WindowManager::ui_scale = 1.0f;
 bool WindowManager::dark_mode = false;
 int WindowManager::wallpaper_theme_id = 0;
+int WindowManager::current_theme = 0;
 
 // ---------------------------------------------------------------------------
 // String helpers
@@ -494,15 +568,14 @@ void WindowManager::draw_window_body(Window* win, uint8_t alpha, bool is_termina
     uint8_t body_alpha = alpha; 
 
     bool active = (win == active_window && !win->is_minimized);
-    uint32_t border_c = dark_mode ? 0x00374151 : 0x00D1D5DB;
-    uint32_t title_bg = dark_mode ? 0x001F2937 : 0x00F3F4F6;
-    uint32_t divider_c = dark_mode ? 0x002D3748 : 0x00E5E7EB;
+    bool fast_mode = (win == active_window && (is_resizing_window || win->is_dragging));
+    uint8_t decorator_alpha = fast_mode ? alpha : (uint8_t)(alpha * 180 / 255);
 
     // 1. Draw Bounding Rounded Window Frame (Outer Border)
-    drivers::Framebuffer::draw_rounded_rect_alpha(r.x, r.y, r.w, r.h, CORNER_RADIUS, border_c, alpha);
+    drivers::Framebuffer::draw_rounded_rect_alpha(r.x, r.y, r.w, r.h, CORNER_RADIUS, C_BORDER, decorator_alpha);
     
     // 2. Draw Title Bar (Rounded Top Corners, Flat Bottom)
-    drivers::Framebuffer::draw_rounded_rect_alpha(r.x + 1, r.y + 1, r.w - 2, TITLE_BAR_HEIGHT + CORNER_RADIUS, CORNER_RADIUS, title_bg, alpha);
+    drivers::Framebuffer::draw_rounded_rect_alpha(r.x + 1, r.y + 1, r.w - 2, TITLE_BAR_HEIGHT + CORNER_RADIUS, CORNER_RADIUS, C_TITLE_BG, decorator_alpha);
     
     // 3. Draw Client Area (Rounded Bottom Corners, Flat Top)
     int client_y = r.y + TITLE_BAR_HEIGHT;
@@ -512,7 +585,7 @@ void WindowManager::draw_window_body(Window* win, uint8_t alpha, bool is_termina
     drivers::Framebuffer::draw_rect_alpha(r.x + 1, client_y, r.w - 2, CORNER_RADIUS, win->bg_color, body_alpha);
 
     // 4. Draw Header/Client Divider Line
-    drivers::Framebuffer::draw_rect_alpha(r.x + 1, client_y - 1, r.w - 2, 1, divider_c, alpha);
+    drivers::Framebuffer::draw_rect_alpha(r.x + 1, client_y - 1, r.w - 2, 1, C_DIVIDER, decorator_alpha);
 
     // 5. Centered Window Title Text
     int tw = get_string_width(win->title, scale_font(14.0f));
@@ -635,16 +708,7 @@ void WindowManager::draw_finder_content(Window* win) {
                 drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy - 5, 64, 80, 8, 0x0080B0F0, 100);
             }
 
-            uint32_t icon_c = it.is_directory ? C_FOLDER : (it.is_terminal ? 0x001A1A1A : C_FILE);
-            drivers::Framebuffer::draw_rounded_rect_alpha(ix + 12, iy, 40, 40, 8, icon_c, 255);
-            
-            if (it.is_directory) {
-                int lw = get_string_width("F", 14.0f);
-                draw_string("F", ix + 12 + (40 - lw)/2, iy + 13, C_WHITE, 14.0f);
-            } else if (it.is_terminal) {
-                int lw = get_string_width("T", 14.0f);
-                draw_string("T", ix + 12 + (40 - lw)/2, iy + 13, 0x004AF02C, 14.0f);
-            }
+            draw_vector_icon(it.name, ix + 12, iy, 40, it.is_directory, it.is_terminal, is_item_selected);
             
             if (is_item_selected && is_renaming_item) {
                 drivers::Framebuffer::draw_rounded_rect_alpha(ix - 10, iy + 42, 84, 20, 4, C_WHITE, 255);
@@ -1394,8 +1458,15 @@ void WindowManager::init() {
                                 set_ui_scale(ui_scale);
                             }
                         } else if (title_starts_with_custom(line, "THEME ")) {
-                            bool is_dark = str_equal(line + 6, "DARK");
-                            set_theme(is_dark);
+                            int theme_id = 0;
+                            if (str_equal(line + 6, "DARK")) {
+                                theme_id = 1;
+                            } else if (str_equal(line + 6, "NORD")) {
+                                theme_id = 2;
+                            } else if (str_equal(line + 6, "WARM")) {
+                                theme_id = 3;
+                            }
+                            set_theme(theme_id);
                         } else if (title_starts_with_custom(line, "WALLPAPER ")) {
                             int wp_id = line[10] - '0';
                             drivers::Framebuffer::set_wallpaper_theme(wp_id);
@@ -1702,6 +1773,88 @@ void WindowManager::blit_cursor() {
 // ---------------------------------------------------------------------------
 // Desktop / wallpaper
 // ---------------------------------------------------------------------------
+static void draw_vector_icon(const char* name, int x, int y, int size, bool is_directory, bool is_terminal, bool selected) {
+    if (is_directory) {
+        if (str_equal(name, "USB_DRIVE")) {
+            uint32_t body_c = 0x00ECEFF1; // Silver metal
+            uint32_t tip_c = 0x0078909C; // Darker metal connector
+            uint32_t active_c = selected ? 0x000A84FF : 0x00B0BEC5; // Selection color or default gray outline
+            
+            // Silver main body
+            drivers::Framebuffer::draw_rounded_rect_alpha(x + size/4, y + size/3, size/2, size/2, size/12, body_c, 255);
+            drivers::Framebuffer::draw_rounded_rect_alpha(x + size/4, y + size/3, size/2, size/2, size/12, active_c, 100);
+            
+            // Metal neck connector tip
+            drivers::Framebuffer::draw_rect_alpha(x + size/3 + size/24, y + size/6, size/4, size/6, tip_c, 255);
+            // Highlight connector edge
+            drivers::Framebuffer::draw_rect_alpha(x + size/3 + size/24, y + size/6, size/4, size/24, 0x00CFD8DC, 255);
+            
+            // Green activity LED dot
+            drivers::Framebuffer::draw_circle_filled(x + size/2, y + 2*size/3, 2, 0x0030D158);
+        } else {
+            uint32_t back_c   = selected ? 0x000F52BA : 0x000078D4;
+            uint32_t tab_c    = selected ? 0x000E4EAA : 0x000063B1;
+            uint32_t front_c  = selected ? 0x004CA0FF : 0x003A96DD;
+            uint32_t border_c = selected ? 0x0090C8FF : 0x0078BAEC;
+            
+            // 1. Back flap
+            drivers::Framebuffer::draw_rounded_rect_alpha(x, y + size/5, size, size - size/5, size/8, back_c, 255);
+            // 2. Top tab
+            drivers::Framebuffer::draw_rounded_rect_alpha(x + size/12, y + size/15, size/2, size/4, size/10, tab_c, 255);
+            // Fill tab seam
+            drivers::Framebuffer::draw_rect_alpha(x + size/12, y + size/5, size/2, size/12, back_c, 255);
+            // 3. Front pocket flap
+            drivers::Framebuffer::draw_rounded_rect_alpha(x, y + size/3, size, size - size/3, size/8, front_c, 255);
+            // 4. Highlight front pocket upper border line
+            drivers::Framebuffer::draw_line(x + 1, y + size/3 + 1, x + size - 2, y + size/3 + 1, border_c);
+        }
+    } else if (is_terminal) {
+        uint32_t bg_c = 0x00171717;
+        uint32_t bezel_c = selected ? 0x000A84FF : 0x00404040;
+        
+        // Console chassis screen
+        drivers::Framebuffer::draw_rounded_rect_alpha(x, y, size, size, size/8, bg_c, 255);
+        // Bezel outline
+        drivers::Framebuffer::draw_rounded_rect_alpha(x, y, size, size, size/8, bezel_c, 120);
+        
+        // Prompt >
+        int px = x + size/5;
+        int py = y + size/3;
+        int p_sz = size/6;
+        drivers::Framebuffer::draw_line(px, py, px + p_sz, py + p_sz, 0x0030D158);
+        drivers::Framebuffer::draw_line(px + p_sz, py + p_sz, px, py + 2*p_sz, 0x0030D158);
+        
+        // Cursor block _
+        drivers::Framebuffer::draw_rect_alpha(px + p_sz + size/12, py + p_sz + size/10, size/5, size/10, 0x0030D158, 255);
+    } else {
+        uint32_t page_c = 0x00F8F9FA;
+        uint32_t border_c = selected ? 0x000A84FF : 0x00CFD8DC;
+        uint32_t line_c = 0x00ECEFF1;
+        
+        // Page base shape
+        drivers::Framebuffer::draw_rounded_rect_alpha(x, y, size, size, size/10, page_c, 255);
+        drivers::Framebuffer::draw_rounded_rect_alpha(x, y, size, size, size/10, border_c, 100);
+        
+        // Corner dog-ear fold
+        int fold_sz = size/3;
+        int fx = x + size - fold_sz;
+        int fy = y;
+        
+        // Fold background
+        drivers::Framebuffer::draw_rect_alpha(fx, fy, fold_sz, fold_sz, 0x00CFD8DC, 255);
+        // Fold line boundary
+        drivers::Framebuffer::draw_line(fx, fy, fx + fold_sz - 1, fy + fold_sz - 1, border_c);
+        
+        // Horizontal text lines
+        int start_y = y + size/3 + size/24;
+        int line_w = size - 2 * (size/6);
+        int gap_y = size/8;
+        for (int i = 0; i < 3; ++i) {
+            drivers::Framebuffer::draw_rect_alpha(x + size/6, start_y + i * gap_y, line_w, size/16, line_c, 255);
+        }
+    }
+}
+
 void WindowManager::draw_wallpaper() {
     int w = drivers::Framebuffer::get_width();
     int h = drivers::Framebuffer::get_height();
@@ -1729,17 +1882,7 @@ void WindowManager::draw_desktop_icons() {
                 drivers::Framebuffer::draw_rounded_rect_alpha(it.x, it.y - (int)(5 * ui_scale), size_bg_w, size_bg_h, (int)(8 * ui_scale), 0x0080B0F0, 100);
             }
 
-            uint32_t icon_c = it.is_directory ? C_FOLDER : (it.is_terminal ? 0x001A1A1A : C_FILE);
-            
-            drivers::Framebuffer::draw_rounded_rect_alpha(it.x + pad_ic, it.y, size_ic, size_ic, radius_ic, icon_c, 255);
-            
-            if (it.is_directory) {
-                int lw = get_string_width("F", 15.0f);
-                draw_string("F", it.x + pad_ic + (size_ic - lw)/2, it.y + (int)(12 * ui_scale), C_WHITE, 15.0f);
-            } else if (it.is_terminal) {
-                int lw = get_string_width("T", 15.0f);
-                draw_string("T", it.x + pad_ic + (size_ic - lw)/2, it.y + (int)(12 * ui_scale), 0x004AF02C, 15.0f);
-            }
+            draw_vector_icon(it.name, it.x + pad_ic, it.y, size_ic, it.is_directory, it.is_terminal, it.selected);
             
             int label_w = get_string_width(it.name, 13.0f);
             int label_x = it.x + (size_bg_w - label_w) / 2;
@@ -2198,64 +2341,451 @@ void WindowManager::draw_start_menu() {
 // ---------------------------------------------------------------------------
 // Context menu
 // ---------------------------------------------------------------------------
-void WindowManager::draw_menu() {
-    if (!active_menu.active) return;
+static void get_vfs_path(const char* active_dir, const char* name, char* out_path) {
+    if (str_equal(active_dir, "Desktop")) {
+        str_copy(out_path, "/Desktop/", 256);
+    } else if (str_equal(active_dir, "Documents")) {
+        str_copy(out_path, "/Documents/", 256);
+    } else if (str_equal(active_dir, "Applications")) {
+        str_copy(out_path, "/Applications/", 256);
+    } else {
+        str_copy(out_path, active_dir, 256);
+        size_t len = str_len(out_path);
+        if (len > 0 && out_path[len - 1] != '/') {
+            out_path[len] = '/';
+            out_path[len + 1] = '\0';
+        }
+    }
+    size_t len = str_len(out_path);
+    str_copy(out_path + len, name, 256 - len);
+}
 
-    // Draw shadow
-    for (int i = 0; i < 4; ++i) {
-        drivers::Framebuffer::draw_rounded_rect_alpha(
-            active_menu.x - i + 2, active_menu.y - i + 2,
-            active_menu.w + i * 2, active_menu.h + i * 2,
-            8 + i, C_BLACK, 25 - i * 5);
+void WindowManager::remove_vfs_node(const char* path) {
+    const char* rel_path = path;
+    if (path[0] == '/') rel_path = path + 1;
+    for (size_t i = 0; i < fs::VFS::node_count; ++i) {
+        if (str_equal(fs::VFS::child_nodes[i].name, rel_path)) {
+            if (fs::VFS::child_nodes[i].data) {
+                kernel::kfree(fs::VFS::child_nodes[i].data);
+            }
+            for (size_t j = i; j < fs::VFS::node_count - 1; ++j) {
+                fs::VFS::child_nodes[j] = fs::VFS::child_nodes[j + 1];
+            }
+            fs::VFS::node_count--;
+            break;
+        }
+    }
+}
+
+void WindowManager::delete_desktop_item(int sel) {
+    if (sel < 0 || sel >= desktop_item_count) return;
+    DiskItem it = desktop_items[sel];
+    
+    // 1. Delete from VFS
+    char vfs_path[256];
+    get_vfs_path(it.path, it.name, vfs_path);
+    
+    const char* rel_path = vfs_path;
+    if (vfs_path[0] == '/') rel_path = vfs_path + 1;
+    
+    for (size_t i = 0; i < fs::VFS::node_count; ++i) {
+        if (str_equal(fs::VFS::child_nodes[i].name, rel_path)) {
+            if (fs::VFS::child_nodes[i].data) {
+                kernel::kfree(fs::VFS::child_nodes[i].data);
+            }
+            for (size_t j = i; j < fs::VFS::node_count - 1; ++j) {
+                fs::VFS::child_nodes[j] = fs::VFS::child_nodes[j + 1];
+            }
+            fs::VFS::node_count--;
+            break;
+        }
     }
 
-    // Translucent menu background
-    drivers::Framebuffer::draw_rounded_rect_alpha(
-        active_menu.x, active_menu.y, active_menu.w, active_menu.h, 8, C_MENU_BG, 230);
+    // If it's a directory, recursively delete children from VFS
+    if (it.is_directory) {
+        char prefix[256];
+        str_copy(prefix, rel_path, 256);
+        size_t len = str_len(prefix);
+        prefix[len++] = '/';
+        prefix[len] = '\0';
+        for (size_t i = 0; i < fs::VFS::node_count; ) {
+            if (title_starts_with_custom(fs::VFS::child_nodes[i].name, prefix)) {
+                if (fs::VFS::child_nodes[i].data) {
+                    kernel::kfree(fs::VFS::child_nodes[i].data);
+                }
+                for (size_t j = i; j < fs::VFS::node_count - 1; ++j) {
+                    fs::VFS::child_nodes[j] = fs::VFS::child_nodes[j + 1];
+                }
+                fs::VFS::node_count--;
+            } else {
+                i++;
+            }
+        }
+    }
 
-    // Outer thin border for glassmorphism look
-    uint32_t border_color = C_MENU_LINE;
-    drivers::Framebuffer::draw_rounded_rect_alpha(
-        active_menu.x, active_menu.y, active_menu.w, active_menu.h, 8, border_color, 120);
+    // 2. Remove from desktop_items
+    for (int j = sel; j < desktop_item_count - 1; j++) {
+        desktop_items[j] = desktop_items[j + 1];
+    }
+    desktop_item_count--;
 
-    const char** items = nullptr;
+    // If it was a directory, also remove all items inside it from desktop_items
+    if (it.is_directory) {
+        for (int j = 0; j < desktop_item_count; ) {
+            if (str_equal(desktop_items[j].path, it.name)) {
+                for (int k = j; k < desktop_item_count - 1; k++) {
+                    desktop_items[k] = desktop_items[k + 1];
+                }
+                desktop_item_count--;
+            } else {
+                j++;
+            }
+        }
+    }
+}
+
+void WindowManager::execute_menu_action(int action_id) {
+    int width = (int)drivers::Framebuffer::get_width();
+    int height = (int)drivers::Framebuffer::get_height();
+
+    const char* active_dir = "Desktop";
+    if (active_window && active_window->title_is("Finder")) {
+        active_dir = active_window->text_input;
+        if (active_window->text_len == 0) active_dir = "Desktop";
+    }
+
+    if (action_id == 0) { // About This Mac
+        create_window((width - 500) / 2, (height - 320) / 2, 500, 320, "About This Mac", C_FINDER);
+    } else if (action_id == 1 || action_id == 2) { // Restart or Shut Down
+        drivers::Serial::println("[SYSTEM] Initiating shutdown sequence...");
+        __asm__ volatile("cli; hlt");
+    } else if (action_id == 3) { // New Finder Window
+        create_window(200, 150, 500, 350, "Finder", C_FINDER);
+    } else if (action_id == 4) { // Close All Windows
+        while (window_list_head) close_window(window_list_head->id);
+    } else if (action_id == 5) { // New Folder
+        char folder_name[64];
+        int count = 1;
+        bool exists = true;
+        while (exists) {
+            exists = false;
+            char num_buf[16];
+            int_to_str(count, num_buf, 16);
+            int n_idx = 0;
+            const char* prefix = "New Folder ";
+            int p_idx = 0;
+            while (prefix[p_idx]) { folder_name[n_idx++] = prefix[p_idx++]; }
+            p_idx = 0;
+            while (num_buf[p_idx]) { folder_name[n_idx++] = num_buf[p_idx++]; }
+            folder_name[n_idx] = '\0';
+            
+            for (int i = 0; i < desktop_item_count; i++) {
+                if (str_equal(desktop_items[i].path, active_dir) && str_equal(desktop_items[i].name, folder_name)) {
+                    exists = true;
+                    break;
+                }
+            }
+            count++;
+        }
+        int next_y = 60;
+        if (str_equal(active_dir, "Desktop")) {
+            for (int i = 0; i < desktop_item_count; i++) {
+                if (str_equal(desktop_items[i].path, "Desktop") && desktop_items[i].y >= next_y) {
+                    next_y = desktop_items[i].y + 90;
+                }
+            }
+        }
+        add_item(folder_name, true, false, active_dir, 30, next_y);
+    } else if (action_id == 6) { // New Text File
+        char file_name[64];
+        int count = 1;
+        bool exists = true;
+        while (exists) {
+            exists = false;
+            char num_buf[16];
+            int_to_str(count, num_buf, 16);
+            int n_idx = 0;
+            const char* prefix = "New File ";
+            int p_idx = 0;
+            while (prefix[p_idx]) { file_name[n_idx++] = prefix[p_idx++]; }
+            p_idx = 0;
+            while (num_buf[p_idx]) { file_name[n_idx++] = num_buf[p_idx++]; }
+            file_name[n_idx++] = '.'; file_name[n_idx++] = 't'; file_name[n_idx++] = 'x'; file_name[n_idx++] = 't';
+            file_name[n_idx] = '\0';
+            
+            for (int i = 0; i < desktop_item_count; i++) {
+                if (str_equal(desktop_items[i].path, active_dir) && str_equal(desktop_items[i].name, file_name)) {
+                    exists = true;
+                    break;
+                }
+            }
+            count++;
+        }
+        int next_y = 60;
+        if (str_equal(active_dir, "Desktop")) {
+            for (int i = 0; i < desktop_item_count; i++) {
+                if (str_equal(desktop_items[i].path, "Desktop") && desktop_items[i].y >= next_y) {
+                    next_y = desktop_items[i].y + 90;
+                }
+            }
+        }
+        add_item(file_name, false, false, active_dir, 30, next_y);
+    } else if (action_id == 7) { // Open Terminal
+        create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
+    } else if (action_id == 8) { // Clean Up
+        arrange_desktop();
+    } else if (action_id == 9 || action_id == 10) { // Copy / Cut
+        int sel = -1;
+        if (active_window && active_window->title_is("Finder")) {
+            sel = active_window->selected_item_idx;
+        } else {
+            for (int j = 0; j < desktop_item_count; j++) {
+                if (desktop_items[j].selected) { sel = j; break; }
+            }
+        }
+        if (sel != -1) {
+            clipboard_item_idx = sel;
+            clipboard_is_cut = (action_id == 10);
+            get_vfs_path(desktop_items[sel].path, desktop_items[sel].name, clipboard_path);
+        }
+    } else if (action_id == 11) { // Rename
+        is_renaming_item = true;
+        if (active_window && !active_window->title_is("Finder")) {
+            active_window = nullptr;
+        }
+    } else if (action_id == 12) { // Delete
+        int sel = -1;
+        if (active_window && active_window->title_is("Finder")) {
+            sel = active_window->selected_item_idx;
+            active_window->selected_item_idx = -1;
+        } else {
+            for (int j = 0; j < desktop_item_count; j++) {
+                if (desktop_items[j].selected) { sel = j; break; }
+            }
+        }
+        if (sel != -1) {
+            delete_desktop_item(sel);
+        }
+    } else if (action_id == 13) { // Paste
+        if (clipboard_path[0] != '\0') {
+            fs::VFSNode* src_node = fs::VFS::open(clipboard_path);
+            if (src_node) {
+                const char* base_name = src_node->name;
+                int last_slash = -1;
+                for (int j = 0; clipboard_path[j] != '\0'; j++) {
+                    if (clipboard_path[j] == '/') last_slash = j;
+                }
+                if (last_slash != -1) base_name = clipboard_path + last_slash + 1;
+
+                char dest_path[256];
+                get_vfs_path(active_dir, base_name, dest_path);
+
+                const char* rel_dest = dest_path;
+                if (dest_path[0] == '/') rel_dest = dest_path + 1;
+                
+                // Remove duplicate in target folder from VFS Node pool
+                for (size_t i = 0; i < fs::VFS::node_count; ++i) {
+                    if (str_equal(fs::VFS::child_nodes[i].name, rel_dest)) {
+                        if (fs::VFS::child_nodes[i].data) {
+                            kernel::kfree(fs::VFS::child_nodes[i].data);
+                        }
+                        for (size_t j = i; j < fs::VFS::node_count - 1; ++j) {
+                            fs::VFS::child_nodes[j] = fs::VFS::child_nodes[j + 1];
+                        }
+                        fs::VFS::node_count--;
+                        break;
+                    }
+                }
+                // Remove duplicate from desktop items cached array
+                for (int j = 0; j < desktop_item_count; j++) {
+                    if (str_equal(desktop_items[j].path, active_dir) && str_equal(desktop_items[j].name, base_name)) {
+                        for (int k = j; k < desktop_item_count - 1; k++) {
+                            desktop_items[k] = desktop_items[k + 1];
+                        }
+                        desktop_item_count--;
+                        break;
+                    }
+                }
+
+                char* new_data = nullptr;
+                if (src_node->size > 0 && src_node->data) {
+                    new_data = (char*)kernel::kmalloc(src_node->size + 4096);
+                    if (new_data) {
+                        memcpy(new_data, src_node->data, src_node->size);
+                    }
+                }
+                
+                fs::VFSNode* dst_node = fs::VFS::create_file(dest_path, new_data, src_node->size + 4096);
+                if (dst_node) {
+                    dst_node->type = src_node->type;
+                    dst_node->size = src_node->size;
+                }
+
+                bool is_term = false;
+                if (str_equal(base_name, "Terminal.app") || str_equal(base_name, "Terminal")) {
+                    is_term = true;
+                }
+                add_item(base_name, src_node->type == fs::NodeType::DIRECTORY, is_term, active_dir, 0, 0);
+
+                if (clipboard_is_cut) {
+                    remove_vfs_node(clipboard_path);
+                    for (int j = 0; j < desktop_item_count; j++) {
+                        char src_dir[256];
+                        str_copy(src_dir, clipboard_path, 256);
+                        int last_s = -1;
+                        for (int k = 0; src_dir[k] != '\0'; k++) {
+                            if (src_dir[k] == '/') last_s = k;
+                        }
+                        if (last_s != -1) {
+                            src_dir[last_s] = '\0';
+                        }
+                        const char* search_dir = src_dir;
+                        if (src_dir[0] == '/') search_dir = src_dir + 1;
+                        
+                        if (str_equal(desktop_items[j].path, search_dir) && str_equal(desktop_items[j].name, base_name)) {
+                            for (int k = j; k < desktop_item_count - 1; k++) {
+                                desktop_items[k] = desktop_items[k + 1];
+                            }
+                            desktop_item_count--;
+                            break;
+                        }
+                    }
+                    clipboard_path[0] = '\0';
+                }
+            }
+        }
+    } else if (action_id == 14) { // Open (Desktop Item)
+        int sel = -1;
+        for (int j = 0; j < desktop_item_count; j++) {
+            if (desktop_items[j].selected) { sel = j; break; }
+        }
+        if (sel != -1) {
+            DiskItem& it = desktop_items[sel];
+            if (it.is_directory) {
+                Window* w = create_window(200, 150, 500, 350, "Finder", C_FINDER);
+                if (w) {
+                    int len = 0;
+                    while (it.name[len] && len < 250) {
+                        w->text_input[len] = it.name[len];
+                        len++;
+                    }
+                    w->text_input[len] = '\0';
+                    w->text_len = len;
+                }
+            } else if (it.is_terminal) {
+                create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
+            } else if (str_equal(it.name, "System Settings")) {
+                create_window((width - 500)/2, (height - 420)/2, 500, 420, "System Settings", 0x00FFFFFF);
+            } else {
+                char edit_title[128] = "Code Editor - /";
+                int t_idx = 15;
+                int n_idx = 0;
+                while (it.name[n_idx]) { edit_title[t_idx++] = it.name[n_idx++]; }
+                edit_title[t_idx] = '\0';
+                
+                Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
+                if (code_win) {
+                    char full_path[256];
+                    get_vfs_path(it.path, it.name, full_path);
+                    
+                    fs::VFSNode* node = fs::VFS::open(full_path);
+                    if (node) {
+                        fs::File f;
+                        f.node = node;
+                        f.offset = 0;
+                        ssize_t bytes = fs::VFS::read(&f, code_win->text_input, sizeof(code_win->text_input) - 1);
+                        if (bytes > 0) {
+                            code_win->text_input[bytes] = '\0';
+                            code_win->text_len = bytes;
+                        }
+                    }
+                }
+            }
+        }
+    } else if (action_id == 15) { // Eject USB
+        usb_connected = false;
+        drivers::Serial::println("[USB] Mass Storage device safely removed.");
+        for (int j = 0; j < desktop_item_count; ) {
+            if (str_equal(desktop_items[j].name, "USB_DRIVE") || str_equal(desktop_items[j].path, "USB_DRIVE")) {
+                for (int k = j; k < desktop_item_count - 1; k++) {
+                    desktop_items[k] = desktop_items[k + 1];
+                }
+                desktop_item_count--;
+            } else {
+                j++;
+            }
+        }
+    } else if (action_id >= 16 && action_id <= 19) { // Set Theme presets (0, 1, 2, 3)
+        set_theme(action_id - 16);
+    } else if (action_id == 20) { // Minimize
+        if (active_window) minimize_window_animated(active_window);
+    } else if (action_id == 21) { // Zoom
+        if (active_window) {
+            if (active_window->is_maximized) {
+                active_window->rect = active_window->orig_rect;
+                active_window->is_maximized = false;
+            } else {
+                active_window->orig_rect = active_window->rect;
+                active_window->rect = {0, MENU_BAR_HEIGHT, width, height - TASKBAR_HEIGHT - MENU_BAR_HEIGHT};
+                active_window->is_maximized = true;
+            }
+        }
+    } else if (action_id == 23) { // Help
+        create_window(250, 180, 600, 400, "Safari", C_FINDER);
+    } else if (action_id == 24) { // Send Feedback
+        create_window(250, 180, 600, 400, "Safari", C_FINDER);
+    }
+}
+
+static int populate_menu_items(int type, MenuItem* list) {
     int count = 0;
+    bool selected_usb = false;
 
-    if (active_menu.type == 0) {
-        static const char* apple_items[] = {"About This Mac", "Restart", "Shut Down"};
-        items = apple_items; count = 3;
-    } else if (active_menu.type == 1) {
-        static const char* finder_items[] = {"New Window", "Close All"};
-        items = finder_items; count = 2;
-    } else if (active_menu.type == 2) {
-        static const char* desktop_items[] = {"New Folder", "New File", "Open Terminal", "Clean Up"};
-        items = desktop_items; count = 4;
-    } else if (active_menu.type == 3) {
-        static const char* file_items[] = {"New Finder Window", "Close Window"};
-        items = file_items; count = 2;
-    } else if (active_menu.type == 4) {
-        static const char* edit_items[] = {"Undo", "Redo", "Cut", "Copy"};
-        items = edit_items; count = 4;
-    } else if (active_menu.type == 5) {
-        static const char* view_items[] = {"As Icons", "As List"};
-        items = view_items; count = 2;
-    } else if (active_menu.type == 6) {
-        static const char* go_items[] = {"Applications", "Documents", "Downloads", "Home"};
-        items = go_items; count = 4;
-    } else if (active_menu.type == 7) {
-        static const char* window_items[] = {"Minimize", "Zoom", "Bring All to Front"};
-        items = window_items; count = 3;
-    } else if (active_menu.type == 8) {
-        static const char* help_items[] = {"Crecent Help", "Send Feedback"};
-        items = help_items; count = 2;
-    } else if (active_menu.type == 9) {
-        static const char* finder_item_items[] = {"Copy", "Cut", "Rename", "Delete"};
-        items = finder_item_items; count = 4;
-    } else if (active_menu.type == 10) {
-        static const char* finder_empty_items[] = {"Paste", "New Folder", "New File"};
-        items = finder_empty_items; count = 3;
-    } else if (active_menu.type == 11) {
-        bool selected_usb = false;
+    if (type == 0) { // Apple Menu
+        list[count++] = {"About This Mac", 0, -1, true};
+        list[count++] = {"Restart", 1, -1, true};
+        list[count++] = {"Shut Down", 2, -1, true};
+    } else if (type == 1) { // Finder Menu Bar
+        list[count++] = {"New Window", 3, -1, true};
+        list[count++] = {"Close All", 4, -1, true};
+    } else if (type == 2) { // Desktop Empty Space
+        list[count++] = {"New", -1, 100, true};
+        list[count++] = {"Open Terminal", 7, -1, true};
+        list[count++] = {"Theme", -1, 101, true};
+        list[count++] = {"Clean Up", 8, -1, true};
+    } else if (type == 3) { // Finder File Menu
+        list[count++] = {"New Finder Window", 3, -1, true};
+        list[count++] = {"Close Window", 4, -1, true};
+    } else if (type == 4) { // Finder Edit Menu
+        list[count++] = {"Undo", 1000, -1, false};
+        list[count++] = {"Redo", 1001, -1, false};
+        list[count++] = {"Cut", 10, -1, true};
+        list[count++] = {"Copy", 9, -1, true};
+    } else if (type == 5) { // Finder View Menu
+        list[count++] = {"As Icons", 1002, -1, true};
+        list[count++] = {"As List", 1003, -1, true};
+    } else if (type == 6) { // Finder Go Menu
+        list[count++] = {"Applications", 1004, -1, true};
+        list[count++] = {"Documents", 1005, -1, true};
+        list[count++] = {"Downloads", 1006, -1, true};
+        list[count++] = {"Home", 1007, -1, true};
+    } else if (type == 7) { // Finder Window Menu
+        list[count++] = {"Minimize", 20, -1, true};
+        list[count++] = {"Zoom", 21, -1, true};
+        list[count++] = {"Bring All to Front", 22, -1, true};
+    } else if (type == 8) { // Finder Help Menu
+        list[count++] = {"Crecent Help", 23, -1, true};
+        list[count++] = {"Send Feedback", 24, -1, true};
+    } else if (type == 9) { // Finder Item Context Menu
+        list[count++] = {"Copy", 9, -1, true};
+        list[count++] = {"Cut", 10, -1, true};
+        list[count++] = {"Rename", 11, -1, true};
+        list[count++] = {"Delete", 12, -1, true};
+    } else if (type == 10) { // Finder Empty Space
+        bool has_clipboard = (clipboard_path[0] != '\0');
+        list[count++] = {"Paste", 13, -1, has_clipboard};
+        list[count++] = {"New", -1, 100, true};
+    } else if (type == 11) { // Desktop Item Context Menu
         for (int j = 0; j < desktop_item_count; j++) {
             if (desktop_items[j].selected && str_equal(desktop_items[j].name, "USB_DRIVE")) {
                 selected_usb = true;
@@ -2263,36 +2793,111 @@ void WindowManager::draw_menu() {
             }
         }
         if (selected_usb) {
-            static const char* desktop_usb_items[] = {"Open", "Rename", "Eject USB", "Clean Up"};
-            items = desktop_usb_items; count = 4;
+            list[count++] = {"Open", 14, -1, true};
+            list[count++] = {"Rename", 11, -1, true};
+            list[count++] = {"Eject USB", 15, -1, true};
+            list[count++] = {"Clean Up", 8, -1, true};
         } else {
-            static const char* desktop_item_items[] = {"Open", "Rename", "Delete", "Clean Up"};
-            items = desktop_item_items; count = 4;
+            list[count++] = {"Open", 14, -1, true};
+            list[count++] = {"Rename", 11, -1, true};
+            list[count++] = {"Delete", 12, -1, true};
+            list[count++] = {"Clean Up", 8, -1, true};
         }
+    } else if (type == 100) { // New Submenu
+        list[count++] = {"Folder", 5, -1, true};
+        list[count++] = {"Text File", 6, -1, true};
+    } else if (type == 101) { // Theme Submenu
+        list[count++] = {"Light", 16, -1, true};
+        list[count++] = {"Dark", 17, -1, true};
+        list[count++] = {"Nord", 18, -1, true};
+        list[count++] = {"Warm", 19, -1, true};
+    }
+    return count;
+}
+
+static void draw_menu_block(int mx, int my, int mw, int mh, const MenuItem* items, int count, int hovered_idx) {
+    // 1. Draw shadow
+    for (int i = 0; i < 4; ++i) {
+        drivers::Framebuffer::draw_rounded_rect_alpha(
+            mx - i + 2, my - i + 2,
+            mw + i * 2, mh + i * 2,
+            8 + i, C_BLACK, 25 - i * 5);
     }
 
+    // 2. Translucent menu background
+    drivers::Framebuffer::draw_rounded_rect_alpha(
+        mx, my, mw, mh, 8, C_MENU_BG, 230);
+
+    // 3. Outer thin border
+    uint32_t border_color = C_MENU_LINE;
+    drivers::Framebuffer::draw_rounded_rect_alpha(
+        mx, my, mw, mh, 8, border_color, 120);
+
+    // 4. Render items
     for (int i = 0; i < count; ++i) {
-        int iy = active_menu.y + MENU_PADDING + i * MENU_ITEM_HEIGHT;
+        int iy = my + MENU_PADDING + i * MENU_ITEM_HEIGHT;
         
-        // Draw elegant hover with rounded corners
-        if (active_menu.hovered_item == i) {
+        if (!items[i].enabled) {
+            // Grayed-out state
+            WindowManager::draw_string(items[i].label, mx + 12, iy + 4, C_TEXT_MUTED, 15.0f);
+        } else if (hovered_idx == i) {
+            // Hover highlight
             drivers::Framebuffer::draw_rounded_rect_alpha(
-                active_menu.x + 4, iy, active_menu.w - 8, 24, 4, C_HOVER, 255);
-            draw_string(items[i], active_menu.x + 12, iy + 4, C_WHITE, 15.0f);
+                mx + 4, iy, mw - 8, 24, 4, C_HOVER, 255);
+            WindowManager::draw_string(items[i].label, mx + 12, iy + 4, C_WHITE, 15.0f);
         } else {
-            draw_string(items[i], active_menu.x + 12, iy + 4, C_TEXT, 15.0f);
+            // Normal state
+            WindowManager::draw_string(items[i].label, mx + 12, iy + 4, C_TEXT, 15.0f);
         }
 
-        // Draw horizontal separators between groups
+        // Draw indicator if item has a submenu
+        if (items[i].submenu_type != -1) {
+            int rx = mx + mw - 16;
+            int ry = iy + 12;
+            drivers::Framebuffer::draw_line(rx, ry - 4, rx + 4, ry, items[i].enabled ? (hovered_idx == i ? C_WHITE : C_TEXT) : C_TEXT_MUTED);
+            drivers::Framebuffer::draw_line(rx + 4, ry, rx, ry + 4, items[i].enabled ? (hovered_idx == i ? C_WHITE : C_TEXT) : C_TEXT_MUTED);
+        }
+
+        // Draw horizontal separators
         bool separator_after = false;
-        if (active_menu.type == 0 && i == 0) separator_after = true; // After About This Mac
-        else if (active_menu.type == 2 && (i == 1 || i == 2)) separator_after = true; // After New File and Open Terminal
-        else if (active_menu.type == 6 && i == 2) separator_after = true; // After Downloads
+        if (str_equal(items[i].label, "About This Mac") ||
+            str_equal(items[i].label, "Open Terminal") ||
+            str_equal(items[i].label, "New File.txt") ||
+            str_equal(items[i].label, "New Folder") ||
+            str_equal(items[i].label, "Downloads") ||
+            str_equal(items[i].label, "Eject USB") ||
+            str_equal(items[i].label, "Delete")) {
+            separator_after = true;
+        }
 
         if (separator_after && i < count - 1) {
             drivers::Framebuffer::draw_rect_alpha(
-                active_menu.x + 8, iy + MENU_ITEM_HEIGHT - 1,
-                active_menu.w - 16, 1, C_MENU_LINE, 100);
+                mx + 8, iy + MENU_ITEM_HEIGHT - 1,
+                mw - 16, 1, C_MENU_LINE, 100);
+        }
+    }
+}
+
+void WindowManager::draw_menu() {
+    if (!active_menu.active) return;
+
+    Rect clip = drivers::Framebuffer::get_clip_rect();
+
+    // 1. Draw main menu if within the clip boundary (include 8px shadow padding)
+    Rect main_rect = {active_menu.x, active_menu.y, active_menu.w, active_menu.h};
+    if (clip.intersects(expanded_rect(main_rect, 8))) {
+        MenuItem main_items[16];
+        int main_count = populate_menu_items(active_menu.type, main_items);
+        draw_menu_block(active_menu.x, active_menu.y, active_menu.w, active_menu.h, main_items, main_count, active_menu.hovered_item);
+    }
+
+    // 2. Draw submenu if active and within the clip boundary (include 8px shadow padding)
+    if (active_submenu.active) {
+        Rect sub_rect = {active_submenu.x, active_submenu.y, active_submenu.w, active_submenu.h};
+        if (clip.intersects(expanded_rect(sub_rect, 8))) {
+            MenuItem sub_items[16];
+            int sub_count = populate_menu_items(active_submenu.type, sub_items);
+            draw_menu_block(active_submenu.x, active_submenu.y, active_submenu.w, active_submenu.h, sub_items, sub_count, active_submenu.hovered_item);
         }
     }
 }
@@ -2314,12 +2919,9 @@ void WindowManager::draw_mac_decorations() {
         draw_dock();
     }
 
-    // Context Menus (including Apple menu and desktop right-clicks)
+    // Context Menus (including Apple menu, submenus, and desktop right-clicks)
     if (active_menu.active) {
-        Rect menu_rect = {active_menu.x, active_menu.y, active_menu.w, active_menu.h};
-        if (clip.intersects(menu_rect)) {
-            draw_menu();
-        }
+        draw_menu();
     }
 }
 
@@ -2497,313 +3099,43 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
     // 2. Left Click Down Logic
     if (!state_updated && left_down) {
         if (active_menu.active) {
-            if (in_rect(new_x, new_y, active_menu.x, active_menu.y, active_menu.w, active_menu.h)) {
-                int item = active_menu.hovered_item;
+            bool clicked_menu = false;
+            
+            // A. Check click on active submenu
+            if (active_submenu.active && in_rect(new_x, new_y, active_submenu.x, active_submenu.y, active_submenu.w, active_submenu.h)) {
+                int item = active_submenu.hovered_item;
                 active_menu.active = false;
+                active_submenu.active = false;
                 if (item != -1) {
-                    if (active_menu.type == 0) {
-                        if (item == 0) create_window((width - 500) / 2, (height - 320) / 2, 500, 320, "About This Mac", C_FINDER);
-                        else {
-                            drivers::Serial::println("[SYSTEM] Initiating shutdown sequence...");
-                            __asm__ volatile("cli; hlt");
-                        }
-                    } else if (active_menu.type == 1) {
-                        if (item == 0) create_window(200, 150, 500, 350, "Finder", C_FINDER);
-                        else {
-                            // Fix 24: O(n^2) list clear replaced with O(n)
-                            while (window_list_head) close_window(window_list_head->id);
-                        }
-                    } else if (active_menu.type == 2) {
-                        if (item == 0) { // New Folder
-                            char folder_name[32] = "New Folder";
-                            int count = 1;
-                            bool exists = true;
-                            while (exists) {
-                                exists = false;
-                                for (int i = 0; i < desktop_item_count; i++) {
-                                    if (str_equal(desktop_items[i].name, folder_name)) {
-                                        exists = true;
-                                        break;
-                                    }
-                                }
-                                if (exists) {
-                                    char num_buf[16];
-                                    int_to_str(count, num_buf, 16);
-                                    folder_name[0] = '\0';
-                                    const char* prefix = "New Folder ";
-                                    int p_idx = 0;
-                                    while (prefix[p_idx]) { folder_name[p_idx] = prefix[p_idx]; p_idx++; }
-                                    int n_idx = 0;
-                                    while (num_buf[n_idx]) { folder_name[p_idx + n_idx] = num_buf[n_idx]; n_idx++; }
-                                    folder_name[p_idx + n_idx] = '\0';
-                                    count++;
-                                }
-                            }
-                            int next_y = 60;
-                            for (int i = 0; i < desktop_item_count; i++) {
-                                if (str_equal(desktop_items[i].path, "Desktop") && desktop_items[i].y >= next_y) {
-                                    next_y = desktop_items[i].y + 90;
-                                }
-                            }
-                            add_item(folder_name, true, false, "Desktop", 30, next_y);
-                        } else if (item == 1) { // New File
-                            char file_name[32] = "New File.txt";
-                            int count = 1;
-                            bool exists = true;
-                            while (exists) {
-                                exists = false;
-                                for (int i = 0; i < desktop_item_count; i++) {
-                                    if (str_equal(desktop_items[i].name, file_name)) {
-                                        exists = true;
-                                        break;
-                                    }
-                                }
-                                if (exists) {
-                                    char num_buf[16];
-                                    int_to_str(count, num_buf, 16);
-                                    file_name[0] = '\0';
-                                    const char* prefix = "New File ";
-                                    int p_idx = 0;
-                                    while (prefix[p_idx]) { file_name[p_idx] = prefix[p_idx]; p_idx++; }
-                                    int n_idx = 0;
-                                    while (num_buf[n_idx]) { file_name[p_idx + n_idx] = num_buf[n_idx]; n_idx++; }
-                                    int s_idx = p_idx + n_idx;
-                                    file_name[s_idx++] = '.'; file_name[s_idx++] = 't'; file_name[s_idx++] = 'x'; file_name[s_idx++] = 't'; file_name[s_idx] = '\0';
-                                    count++;
-                                }
-                            }
-                            int next_y = 60;
-                            for (int i = 0; i < desktop_item_count; i++) {
-                                if (str_equal(desktop_items[i].path, "Desktop") && desktop_items[i].y >= next_y) {
-                                    next_y = desktop_items[i].y + 90;
-                                }
-                            }
-                            add_item(file_name, false, false, "Desktop", 30, next_y);
-                        } else if (item == 2) { // Open Terminal
-                            create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
-                        } else if (item == 3) { // Clean Up
-                            arrange_desktop();
-                        }
-                    } else if (active_menu.type == 3) { // File
-                        if (item == 0) create_window(200, 150, 500, 350, "Finder", C_FINDER);
-                        else if (item == 1 && active_window) close_window(active_window->id);
-                    } else if (active_menu.type == 6) { // Go
-                        if (item == 0) create_window((width - 600) / 2, (height - 400) / 2, 600, 400, "App Store", 0x001B72E8);
-                        else if (item == 3) create_window(200, 150, 500, 350, "Finder", C_FINDER);
-                    } else if (active_menu.type == 7) { // Window
-                        if (item == 0 && active_window) {
-                            minimize_window_animated(active_window);
-                        } else if (item == 1 && active_window) {
-                            if (active_window->is_maximized) {
-                                active_window->rect = active_window->orig_rect;
-                                active_window->is_maximized = false;
-                            } else {
-                                active_window->orig_rect = active_window->rect;
-                                active_window->rect = {0, MENU_BAR_HEIGHT, width, height - TASKBAR_HEIGHT - MENU_BAR_HEIGHT};
-                                active_window->is_maximized = true;
-                            }
-                        }
-                    } else if (active_menu.type == 8) { // Help
-                        if (item == 0) create_window(250, 180, 600, 400, "Safari", C_FINDER);
-                    } else if (active_menu.type == 11) { // Desktop Item Context Menu
-                        int sel = -1;
-                        for (int j = 0; j < desktop_item_count; j++) {
-                            if (desktop_items[j].selected) {
-                                sel = j;
-                                break;
-                            }
-                        }
-                        if (sel != -1) {
-                            DiskItem& it = desktop_items[sel];
-                            if (item == 0) { // Open
-                                if (it.is_directory) {
-                                    Window* w = create_window(200, 150, 500, 350, "Finder", C_FINDER);
-                                    if (w) {
-                                        int len = 0;
-                                        while (it.name[len] && len < 250) {
-                                            w->text_input[len] = it.name[len];
-                                            len++;
-                                        }
-                                        w->text_input[len] = '\0';
-                                        w->text_len = len;
-                                    }
-                                } else if (it.is_terminal) {
-                                    create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
-                                } else if (str_equal(it.name, "System Settings")) {
-                                    create_window((width - 500)/2, (height - 420)/2, 500, 420, "System Settings", 0x00FFFFFF);
-                                } else {
-                                    char edit_title[128] = "Code Editor - /";
-                                    int t_idx = 15;
-                                    int n_idx = 0;
-                                    while (it.name[n_idx]) { edit_title[t_idx++] = it.name[n_idx++]; }
-                                    edit_title[t_idx] = '\0';
-                                    
-                                    Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
-                                    if (code_win) {
-                                        char full_path[128] = "/";
-                                        if (str_equal(it.name, "hello.txt")) {
-                                            const char* hello_p = "tar/hello.txt";
-                                            int hp_idx = 0;
-                                            while (hello_p[hp_idx]) { full_path[1 + hp_idx] = hello_p[hp_idx]; hp_idx++; }
-                                            full_path[1 + hp_idx] = '\0';
-                                        } else {
-                                            int n_idx2 = 0;
-                                            while (it.name[n_idx2]) { full_path[1 + n_idx2] = it.name[n_idx2]; n_idx2++; }
-                                            full_path[1 + n_idx2] = '\0';
-                                        }
-                                        fs::VFSNode* node = fs::VFS::open(full_path);
-                                        if (node) {
-                                            fs::File f;
-                                            f.node = node;
-                                            f.offset = 0;
-                                            ssize_t bytes = fs::VFS::read(&f, code_win->text_input, sizeof(code_win->text_input) - 1);
-                                            if (bytes > 0) {
-                                                code_win->text_input[bytes] = '\0';
-                                                code_win->text_len = bytes;
-                                            }
-                                        }
-                                    }
-                                }
-                            } else if (item == 1) { // Rename
-                                is_renaming_item = true;
-                                active_window = nullptr;
-                            } else if (item == 2) { // Delete or Eject
-                                if (str_equal(it.name, "USB_DRIVE")) {
-                                    usb_connected = false;
-                                    drivers::Serial::println("[USB] Mass Storage device safely removed.");
-                                    for (int j = 0; j < desktop_item_count; ) {
-                                        if (str_equal(desktop_items[j].name, "USB_DRIVE") || str_equal(desktop_items[j].path, "USB_DRIVE")) {
-                                            for (int k = j; k < desktop_item_count - 1; k++) {
-                                                desktop_items[k] = desktop_items[k + 1];
-                                            }
-                                            desktop_item_count--;
-                                        } else {
-                                            j++;
-                                        }
-                                    }
-                                } else {
-                                    for (int j = sel; j < desktop_item_count - 1; j++) {
-                                        desktop_items[j] = desktop_items[j + 1];
-                                    }
-                                    desktop_item_count--;
-                                }
-                                trigger_host_persist();
-                            } else if (item == 3) { // Clean Up
-                                arrange_desktop();
-                                trigger_host_persist();
-                            }
-                        }
-                    } else if (active_menu.type == 9) { // Finder Item Context Menu
-                        if (active_window && active_window->title_is("Finder") && active_window->selected_item_idx != -1) {
-                            int sel = active_window->selected_item_idx;
-                            if (item == 0) { // Copy
-                                clipboard_item_idx = sel;
-                                clipboard_is_cut = false;
-                            } else if (item == 1) { // Cut
-                                clipboard_item_idx = sel;
-                                clipboard_is_cut = true;
-                            } else if (item == 2) { // Rename
-                                is_renaming_item = true;
-                            } else if (item == 3) { // Delete
-                                for (int j = sel; j < desktop_item_count - 1; j++) {
-                                    desktop_items[j] = desktop_items[j + 1];
-                                }
-                                desktop_item_count--;
-                                active_window->selected_item_idx = -1;
-                            }
-                        }
-                    } else if (active_menu.type == 10) { // Finder Empty Context Menu
-                        if (active_window && active_window->title_is("Finder")) {
-                            const char* active_dir = active_window->text_input;
-                            if (active_window->text_len == 0) active_dir = "Desktop";
-                            
-                            if (item == 0) { // Paste
-                                if (clipboard_item_idx != -1 && clipboard_item_idx < desktop_item_count) {
-                                    DiskItem source = desktop_items[clipboard_item_idx];
-                                    
-                                    int dup_idx = -1;
-                                    for (int j = 0; j < desktop_item_count; j++) {
-                                        if (str_equal(desktop_items[j].path, active_dir) && str_equal(desktop_items[j].name, source.name)) {
-                                            dup_idx = j;
-                                            break;
-                                        }
-                                    }
-                                    if (dup_idx != -1) {
-                                        for (int j = dup_idx; j < desktop_item_count - 1; j++) {
-                                            desktop_items[j] = desktop_items[j + 1];
-                                        }
-                                        desktop_item_count--;
-                                        if (clipboard_item_idx > dup_idx) clipboard_item_idx--;
-                                    }
-                                    
-                                    if (clipboard_is_cut) {
-                                        desktop_items[clipboard_item_idx].path = active_dir;
-                                        clipboard_item_idx = -1;
-                                    } else {
-                                        add_item(source.name, source.is_directory, source.is_terminal, active_dir, 0, 0);
-                                    }
-                                }
-                            } else if (item == 1) { // New Folder
-                                char folder_name[64];
-                                int count = 1;
-                                bool exists = true;
-                                while (exists) {
-                                    exists = false;
-                                    char num_buf[16];
-                                    int_to_str(count, num_buf, 16);
-                                    int n_idx = 0;
-                                    const char* prefix = "New Folder ";
-                                    int p_idx = 0;
-                                    while (prefix[p_idx]) { folder_name[n_idx++] = prefix[p_idx++]; }
-                                    p_idx = 0;
-                                    while (num_buf[p_idx]) { folder_name[n_idx++] = num_buf[p_idx++]; }
-                                    folder_name[n_idx] = '\0';
-                                    
-                                    for (int i = 0; i < desktop_item_count; i++) {
-                                        if (str_equal(desktop_items[i].path, active_dir) && str_equal(desktop_items[i].name, folder_name)) {
-                                            exists = true;
-                                            break;
-                                        }
-                                    }
-                                    count++;
-                                }
-                                add_item(folder_name, true, false, active_dir, 0, 0);
-                            } else if (item == 2) { // New File
-                                char file_name[64];
-                                int count = 1;
-                                bool exists = true;
-                                while (exists) {
-                                    exists = false;
-                                    char num_buf[16];
-                                    int_to_str(count, num_buf, 16);
-                                    int n_idx = 0;
-                                    const char* prefix = "New File ";
-                                    int p_idx = 0;
-                                    while (prefix[p_idx]) { file_name[n_idx++] = prefix[p_idx++]; }
-                                    p_idx = 0;
-                                    while (num_buf[p_idx]) { file_name[n_idx++] = num_buf[p_idx++]; }
-                                    file_name[n_idx++] = '.'; file_name[n_idx++] = 't'; file_name[n_idx++] = 'x'; file_name[n_idx++] = 't';
-                                    file_name[n_idx] = '\0';
-                                    
-                                    for (int i = 0; i < desktop_item_count; i++) {
-                                        if (str_equal(desktop_items[i].path, active_dir) && str_equal(desktop_items[i].name, file_name)) {
-                                            exists = true;
-                                            break;
-                                        }
-                                    }
-                                    count++;
-                                }
-                                add_item(file_name, false, false, active_dir, 0, 0);
-                            }
-                        }
+                    MenuItem sub_items[16];
+                    populate_menu_items(active_submenu.type, sub_items);
+                    execute_menu_action(sub_items[item].action_id);
+                }
+                clicked_menu = true;
+            }
+            // B. Check click on active main menu
+            else if (in_rect(new_x, new_y, active_menu.x, active_menu.y, active_menu.w, active_menu.h)) {
+                int item = active_menu.hovered_item;
+                if (item != -1) {
+                    MenuItem main_items[16];
+                    populate_menu_items(active_menu.type, main_items);
+                    if (main_items[item].submenu_type == -1) {
+                        active_menu.active = false;
+                        active_submenu.active = false;
+                        execute_menu_action(main_items[item].action_id);
                     }
                 }
+                clicked_menu = true;
+            }
+            
+            if (clicked_menu) {
                 if (active_menu.type == 2 || active_menu.type == 9 || active_menu.type == 10 || active_menu.type == 11) {
                     trigger_host_persist();
                 }
                 force_redraw_all();
             } else {
                 active_menu.active = false;
+                active_submenu.active = false;
                 force_redraw_all();
             }
             state_updated = true;
@@ -2961,13 +3293,13 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                             }
                         }
                         
-                        for (int i = 0; i < 2; ++i) {
-                            int bx = scale_dim(20 + i * 130);
+                        for (int i = 0; i < 4; ++i) {
+                            int bx = scale_dim(20 + i * 90);
                             int by = scale_dim(120);
-                            int bw = scale_dim(110);
+                            int bw = scale_dim(80);
                             int bh = scale_dim(26);
                             if (rx >= bx && rx < bx + bw && ry >= by && ry < by + bh) {
-                                set_theme(i == 1);
+                                set_theme(i);
                                 trigger_host_persist();
                                 break;
                             }
@@ -3603,26 +3935,100 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
 
     // 5. Menu Hover Tracking
     if (!state_updated && active_menu.active) {
-        int old_hover = active_menu.hovered_item;
-        if (in_rect(new_x, new_y, active_menu.x, active_menu.y, active_menu.w, active_menu.h)) {
-            int max_idx = 2;
-            if (active_menu.type == 0) max_idx = 3;
-            else if (active_menu.type == 4 || active_menu.type == 6 || active_menu.type == 2 || active_menu.type == 11) max_idx = 4;
-            else if (active_menu.type == 7) max_idx = 3;
+        int old_menu_hover = active_menu.hovered_item;
+        int old_sub_hover = active_submenu.hovered_item;
+        bool old_sub_active = active_submenu.active;
+
+        MenuItem main_items[16];
+        int main_count = populate_menu_items(active_menu.type, main_items);
+
+        bool over_submenu = false;
+        if (active_submenu.active && in_rect(new_x, new_y, active_submenu.x, active_submenu.y, active_submenu.w, active_submenu.h)) {
+            over_submenu = true;
+            MenuItem sub_items[16];
+            int sub_count = populate_menu_items(active_submenu.type, sub_items);
             int idx = -1;
-            // Fix 21: Iterate over exact item boxes to avoid off-by-one in 2px gaps
-            for (int i = 0; i < max_idx; i++) {
-                int iy = active_menu.y + MENU_PADDING + i * MENU_ITEM_HEIGHT;
-                if (in_rect(new_x, new_y, active_menu.x, iy, active_menu.w, 24)) {
-                    idx = i; break;
+            for (int i = 0; i < sub_count; i++) {
+                int iy = active_submenu.y + MENU_PADDING + i * MENU_ITEM_HEIGHT;
+                if (in_rect(new_x, new_y, active_submenu.x, iy, active_submenu.w, 24)) {
+                    if (sub_items[i].enabled) {
+                        idx = i;
+                    }
+                    break;
                 }
             }
-            active_menu.hovered_item = idx;
+            active_submenu.hovered_item = idx;
         } else {
-            active_menu.hovered_item = -1;
+            if (active_submenu.active) {
+                if (!in_rect(new_x, new_y, active_menu.x, active_menu.y, active_menu.w, active_menu.h)) {
+                    active_submenu.active = false;
+                    dirty.add({active_submenu.x - 4, active_submenu.y - 4, active_submenu.w + 8, active_submenu.h + 8});
+                    needs_redraw = true;
+                }
+            }
         }
-        if (active_menu.hovered_item != old_hover) {
+
+        if (!over_submenu) {
+            if (in_rect(new_x, new_y, active_menu.x, active_menu.y, active_menu.w, active_menu.h)) {
+                int idx = -1;
+                for (int i = 0; i < main_count; i++) {
+                    int iy = active_menu.y + MENU_PADDING + i * MENU_ITEM_HEIGHT;
+                    if (in_rect(new_x, new_y, active_menu.x, iy, active_menu.w, 24)) {
+                        if (main_items[i].enabled) {
+                            idx = i;
+                        }
+                        break;
+                    }
+                }
+                active_menu.hovered_item = idx;
+
+                if (idx != -1 && main_items[idx].submenu_type != -1) {
+                    int sub_type = main_items[idx].submenu_type;
+                    MenuItem sub_items[16];
+                    int sub_count = populate_menu_items(sub_type, sub_items);
+                    
+                    int sub_x = active_menu.x + active_menu.w - 4;
+                    int sub_y = active_menu.y + MENU_PADDING + idx * MENU_ITEM_HEIGHT;
+                    int sub_w = MENU_WIDTH;
+                    int sub_h = sub_count * MENU_ITEM_HEIGHT + 2 * MENU_PADDING;
+
+                    if (sub_x + sub_w > (int)width) {
+                        sub_x = active_menu.x - sub_w + 4;
+                    }
+
+                    if (!active_submenu.active || active_submenu.type != sub_type || active_submenu.y != sub_y) {
+                        if (active_submenu.active) {
+                            dirty.add({active_submenu.x - 4, active_submenu.y - 4, active_submenu.w + 8, active_submenu.h + 8});
+                        }
+                        active_submenu.active = true;
+                        active_submenu.type = sub_type;
+                        active_submenu.x = sub_x;
+                        active_submenu.y = sub_y;
+                        active_submenu.w = sub_w;
+                        active_submenu.h = sub_h;
+                        active_submenu.hovered_item = -1;
+                        
+                        dirty.add({active_submenu.x - 4, active_submenu.y - 4, active_submenu.w + 8, active_submenu.h + 8});
+                        needs_redraw = true;
+                    }
+                } else if (idx != -1 && main_items[idx].submenu_type == -1 && active_submenu.active) {
+                    active_submenu.active = false;
+                    dirty.add({active_submenu.x - 4, active_submenu.y - 4, active_submenu.w + 8, active_submenu.h + 8});
+                    needs_redraw = true;
+                }
+            } else {
+                active_menu.hovered_item = -1;
+            }
+        }
+
+        if (active_menu.hovered_item != old_menu_hover) {
             dirty.add({active_menu.x - 4, active_menu.y - 4, active_menu.w + 8, active_menu.h + 8});
+            needs_redraw = true;
+        }
+        if (active_submenu.hovered_item != old_sub_hover || active_submenu.active != old_sub_active) {
+            if (active_submenu.active) {
+                dirty.add({active_submenu.x - 4, active_submenu.y - 4, active_submenu.w + 8, active_submenu.h + 8});
+            }
             needs_redraw = true;
         }
     }
@@ -3953,9 +4359,11 @@ void WindowManager::set_ui_scale(float scale) {
     force_redraw_all();
 }
 
-void WindowManager::set_theme(bool dark) {
-    dark_mode = dark;
-    if (dark) {
+void WindowManager::set_theme(int theme_id) {
+    current_theme = theme_id;
+    dark_mode = (theme_id == 1 || theme_id == 2); // Dark and Nord are dark backgrounds
+
+    if (theme_id == 1) { // Dark
         C_WHITE      = 0x001E293B; // Slate 800
         C_BLACK      = 0x00FFFFFF; // White
         C_TEXT       = 0x00F1F5F9; // Slate 100
@@ -3964,7 +4372,34 @@ void WindowManager::set_theme(bool dark) {
         C_MENU_LINE  = 0x00334155; // Slate 700
         C_DOCK_BG    = 0x001E293B; // Slate 800
         C_DOCK_RIM   = 0x00475569; // Slate 600
-    } else {
+        C_BORDER     = 0x00374151; // Slate 700
+        C_TITLE_BG   = 0x001F2937; // Slate 800
+        C_DIVIDER    = 0x002D3748; // Slate 600
+    } else if (theme_id == 2) { // Nord
+        C_WHITE      = 0x002E3440; // Nord 0
+        C_BLACK      = 0x00ECEFF4; // Nord 6
+        C_TEXT       = 0x00ECEFF4; // Nord 6
+        C_TEXT_MUTED = 0x00D8DEE9; // Nord 4
+        C_MENU_BG    = 0x00242933; // Darker Nord
+        C_MENU_LINE  = 0x003B4252; // Nord 1
+        C_DOCK_BG    = 0x002E3440; // Nord 0
+        C_DOCK_RIM   = 0x004C566A; // Nord 3
+        C_BORDER     = 0x003B4252; // Nord 1
+        C_TITLE_BG   = 0x002E3440; // Nord 0
+        C_DIVIDER    = 0x00434C5E; // Nord 2
+    } else if (theme_id == 3) { // Warm / Solarized
+        C_WHITE      = 0x00FDF6E3; // Cream
+        C_BLACK      = 0x00073642; // Dark brown
+        C_TEXT       = 0x00586E75; // Warm gray
+        C_TEXT_MUTED = 0x0093A1A1;
+        C_MENU_BG    = 0x00EEE8D5;
+        C_MENU_LINE  = 0x0093A1A1;
+        C_DOCK_BG    = 0x00EEE8D5;
+        C_DOCK_RIM   = 0x0093A1A1;
+        C_BORDER     = 0x00D3C6AA; // Soft border
+        C_TITLE_BG   = 0x00F6F0DD; // Warm title
+        C_DIVIDER    = 0x00DFD7C3;
+    } else { // Light
         C_WHITE      = 0x00FFFFFF;
         C_BLACK      = 0x00000000;
         C_TEXT       = 0x00333333;
@@ -3973,15 +4408,31 @@ void WindowManager::set_theme(bool dark) {
         C_MENU_LINE  = 0x00D2D2D2;
         C_DOCK_BG    = 0x00EBEBEB;
         C_DOCK_RIM   = 0x00FFFFFF;
+        C_BORDER     = 0x00D1D5DB;
+        C_TITLE_BG   = 0x00F3F4F6;
+        C_DIVIDER    = 0x00E5E7EB;
     }
 
     // Dynamic background update for active mock windows
     for (Window* w = window_list_head; w; w = w->next) {
         if (!w->buffer) {
+            uint32_t bg_normal = 0x00FFFFFF;
+            uint32_t bg_terminal = 0x001B2E3C;
+            if (theme_id == 1) { // Dark
+                bg_normal = 0x001E293B;
+                bg_terminal = 0x000F172A;
+            } else if (theme_id == 2) { // Nord
+                bg_normal = 0x002E3440;
+                bg_terminal = 0x00242933;
+            } else if (theme_id == 3) { // Warm
+                bg_normal = 0x00FDF6E3;
+                bg_terminal = 0x00EEE8D5;
+            }
+
             if (w->title_is("Finder") || w->title_is("Safari") || w->title_is("Mail") || w->title_is("System Settings")) {
-                w->bg_color = dark ? 0x001E293B : 0x00FFFFFF;
+                w->bg_color = bg_normal;
             } else if (w->title_is("Performance Monitor") || w->title_is("System Log")) {
-                w->bg_color = dark ? 0x000F172A : 0x001B2E3C;
+                w->bg_color = bg_terminal;
             }
         }
     }
@@ -4012,13 +4463,13 @@ void WindowManager::draw_settings_content(Window* win) {
     // Draw Section: System Theme
     draw_string("Appearance Mode", x + scale_dim(20), y + scale_dim(125), C_TEXT, 15.0f);
     
-    const char* theme_labels[] = {"Light", "Dark"};
-    for (int i = 0; i < 2; ++i) {
-        int bx = x + scale_dim(20 + i * 130);
+    const char* theme_labels[] = {"Light", "Dark", "Nord", "Warm"};
+    for (int i = 0; i < 4; ++i) {
+        int bx = x + scale_dim(20 + i * 90);
         int by = y + scale_dim(150);
-        int bw = scale_dim(110);
+        int bw = scale_dim(80);
         int bh = scale_dim(26);
-        bool is_active = (dark_mode == (i == 1));
+        bool is_active = (current_theme == i);
         uint32_t bg = is_active ? 0x000F52BA : (dark_mode ? 0x00334155 : 0x00E2E8F0);
         uint32_t tc = is_active ? 0x00FFFFFF : C_TEXT;
         drivers::Framebuffer::draw_rounded_rect_alpha(bx, by, bw, bh, scale_dim(6), bg, 255);

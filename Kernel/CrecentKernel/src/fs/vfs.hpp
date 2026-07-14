@@ -62,7 +62,7 @@ public:
 
     // Static structures representing filesystem state
     static VFSNode root_node;
-    static constexpr size_t MAX_NODES = 16;
+    static constexpr size_t MAX_NODES = 64;
     static VFSNode child_nodes[MAX_NODES];
     static size_t node_count;
 

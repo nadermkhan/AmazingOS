@@ -43,10 +43,24 @@ public:
     bool title_starts_with(const char* s);
 };
 
+struct MenuItem {
+    const char* label;   // Item text
+    int action_id;       // Command ID dispatched on click
+    int submenu_type;    // Nested menu type ID (-1 if none)
+    bool enabled;        // Clickable state
+};
+
 struct ContextMenu {
     bool active;
     int x, y, w, h;
-    int type;        // 0 = Apple, 1 = Finder/File, 2 = Desktop Right-Click
+    int type;        // 0 = Apple, 1 = Finder/File, 2 = Desktop Right-Click, etc.
+    int hovered_item;
+};
+
+struct SubMenu {
+    bool active;
+    int x, y, w, h;
+    int type;        // Submenu type ID (e.g. 100 for New, 101 for Theme)
     int hovered_item;
 };
 
@@ -66,6 +80,7 @@ private:
     static int drag_offset_y;
 
     static ContextMenu active_menu;
+    static SubMenu active_submenu;
 
     static void focus_window(Window* win);
 
@@ -77,6 +92,9 @@ private:
     static void draw_dock();
     static void focus_or_create_app(const char* title, uint32_t bg_color, int w, int h);
     static void draw_menu();
+    static void execute_menu_action(int action_id);
+    static void remove_vfs_node(const char* path);
+    static void delete_desktop_item(int sel);
     static void draw_window_shadow(const Rect& r, bool active, uint8_t alpha);
     static void draw_traffic_lights(Window* win, uint8_t alpha);
     static void draw_window_body(Window* win, uint8_t alpha, bool is_terminal);
@@ -138,11 +156,12 @@ public:
     static float ui_scale;
     static bool dark_mode;
     static int wallpaper_theme_id;
+    static int current_theme;
 
     static inline int scale_dim(int val) { return (int)(val * ui_scale); }
     static inline float scale_font(float size) { return size * ui_scale; }
     static void set_ui_scale(float scale);
-    static void set_theme(bool dark);
+    static void set_theme(int theme_id);
 };
 
 } // namespace wm

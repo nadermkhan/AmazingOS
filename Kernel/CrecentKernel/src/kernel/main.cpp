@@ -641,6 +641,41 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
         drivers::Serial::println("========================================");
         drivers::Serial::println("CrecentKernel COM1 Serial Log Initialized");
         drivers::Serial::println("========================================");
+        
+        drivers::Serial::print("[DEBUG] magic: ");
+        char hex_buf[19];
+        hex_buf[0] = '0'; hex_buf[1] = 'x';
+        const char* hex_chars = "0123456789ABCDEF";
+        for (int x = 0; x < 8; ++x) {
+            hex_buf[2 + x] = hex_chars[(magic >> ((7 - x) * 4)) & 0x0F];
+        }
+        hex_buf[10] = '\0';
+        drivers::Serial::println(hex_buf);
+
+        drivers::Serial::print("[DEBUG] maddr: ");
+        for (int x = 0; x < 16; ++x) {
+            hex_buf[2 + x] = hex_chars[(maddr >> ((15 - x) * 4)) & 0x0F];
+        }
+        hex_buf[18] = '\0';
+        drivers::Serial::println(hex_buf);
+
+        uint32_t* ptr = (uint32_t*)(maddr + VMM_DIRECT_MAP_OFFSET);
+        for (int i = 0; i < 12; ++i) {
+            drivers::Serial::print("[DEBUG] MBI[");
+            char idx_str[4];
+            int offset = i * 4;
+            idx_str[0] = '0' + (offset / 10);
+            idx_str[1] = '0' + (offset % 10);
+            idx_str[2] = '\0';
+            drivers::Serial::print(idx_str);
+            drivers::Serial::print("]: ");
+            uint32_t val = ptr[i];
+            for (int x = 0; x < 8; ++x) {
+                hex_buf[2 + x] = hex_chars[(val >> ((7 - x) * 4)) & 0x0F];
+            }
+            hex_buf[10] = '\0';
+            drivers::Serial::println(hex_buf);
+        }
     }
 
     // 2. Initialize CPU Stacks and Descriptors (GDT & TSS)

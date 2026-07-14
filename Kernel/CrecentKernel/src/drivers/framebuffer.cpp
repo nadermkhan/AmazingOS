@@ -3,6 +3,7 @@
 #include "../kernel/heap.hpp"
 #include "font.hpp"
 #include "serial.hpp"
+#include "../fs/vfs.hpp"
 
 extern "C" void* memcpy(void* dest, const void* src, size_t n);
 
@@ -528,13 +529,176 @@ void Framebuffer::generate_wallpaper_procedural(uint32_t* dst) {
     }
 }
 
+static void print_dec(int val) {
+    char buf[16];
+    int idx = 0;
+    if (val == 0) {
+        drivers::Serial::print("0");
+        return;
+    }
+    if (val < 0) {
+        drivers::Serial::print("-");
+        val = -val;
+    }
+    while (val > 0) {
+        buf[idx++] = '0' + (val % 10);
+        val /= 10;
+    }
+    for (int i = idx - 1; i >= 0; i--) {
+        char c[2] = {buf[i], '\0'};
+        drivers::Serial::print(c);
+    }
+}
+
+bool Framebuffer::load_bmp_wallpaper(const char* path) {
+    if (!initialized || !wallpaper_cache) return false;
+
+    fs::VFSNode* node = fs::VFS::open(path);
+    if (!node) {
+        drivers::Serial::print("[BMP] Failed to open wallpaper file: ");
+        drivers::Serial::println(path);
+        return false;
+    }
+
+    BmpFileHeader file_hdr;
+    BmpInfoHeader info_hdr;
+
+    fs::File file;
+    file.node = node;
+    file.offset = 0;
+
+    if (fs::VFS::read(&file, &file_hdr, sizeof(BmpFileHeader)) != sizeof(BmpFileHeader)) {
+        return false;
+    }
+
+    if (file_hdr.type != 0x4D42) { // 'BM'
+        drivers::Serial::println("[BMP] Invalid magic number");
+        return false;
+    }
+
+    if (fs::VFS::read(&file, &info_hdr, sizeof(BmpInfoHeader)) != sizeof(BmpInfoHeader)) {
+        return false;
+    }
+
+    if (info_hdr.bit_count != 24 && info_hdr.bit_count != 32) {
+        drivers::Serial::println("[BMP] Unsupported bits per pixel (must be 24 or 32)");
+        return false;
+    }
+
+    if (info_hdr.compression != 0) {
+        drivers::Serial::println("[BMP] Compressed BMPs are not supported");
+        return false;
+    }
+
+    int32_t bmp_w = info_hdr.width;
+    int32_t bmp_h = info_hdr.height;
+    bool top_down = (bmp_h < 0);
+    if (bmp_h < 0) bmp_h = -bmp_h;
+
+    drivers::Serial::print("[BMP] Loading wallpaper: ");
+    print_dec(bmp_w);
+    drivers::Serial::print("x");
+    print_dec(bmp_h);
+    drivers::Serial::print(" @ ");
+    print_dec(info_hdr.bit_count);
+    drivers::Serial::println("bpp");
+
+    uint32_t bytes_per_pixel = info_hdr.bit_count / 8;
+    uint32_t bmp_row_size = (bmp_w * bytes_per_pixel + 3) & ~3;
+
+    // Static stack line buffer to prevent heap fragmentation
+    uint8_t line_buffer[8192];
+    if (bmp_row_size > sizeof(line_buffer)) {
+        drivers::Serial::println("[BMP] Image width exceeds static line buffer capacity.");
+        return false;
+    }
+
+    uint32_t sc_w = width;
+    uint32_t sc_h = height;
+
+    // Fast-path: Exact 1920x1080 resolution match
+    if (bmp_w == (int32_t)sc_w && bmp_h == (int32_t)sc_h) {
+        drivers::Serial::println("[BMP] Resolution match. Running fast-path copy.");
+        for (uint32_t sy = 0; sy < sc_h; ++sy) {
+            uint32_t source_y = top_down ? sy : (sc_h - 1 - sy);
+            file.offset = file_hdr.off_bits + source_y * bmp_row_size;
+            
+            if (fs::VFS::read(&file, line_buffer, bmp_row_size) != (ssize_t)bmp_row_size) {
+                return false;
+            }
+
+            uint32_t dest_row = sy * sc_w;
+            if (bytes_per_pixel == 4) {
+                memcpy(&wallpaper_cache[dest_row], line_buffer, sc_w * 4);
+            } else {
+                for (uint32_t sx = 0; sx < sc_w; ++sx) {
+                    uint32_t src_idx = sx * 3;
+                    uint8_t b = line_buffer[src_idx];
+                    uint8_t g = line_buffer[src_idx + 1];
+                    uint8_t r = line_buffer[src_idx + 2];
+                    wallpaper_cache[dest_row + sx] = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Hardcore 16.16 fixed-point scaling path (Zero-FPU)
+    drivers::Serial::println("[BMP] Resolution mismatch. Scaling using 16.16 fixed-point arithmetic.");
+    uint32_t y_ratio = (bmp_h << 16) / sc_h;
+    uint32_t x_ratio = (bmp_w << 16) / sc_w;
+    int last_loaded_y = -1;
+
+    for (uint32_t sy = 0; sy < sc_h; ++sy) {
+        uint32_t bmp_y = (sy * y_ratio) >> 16;
+        if (bmp_y >= (uint32_t)bmp_h) bmp_y = bmp_h - 1;
+        uint32_t source_y = top_down ? bmp_y : (bmp_h - 1 - bmp_y);
+
+        if ((int)source_y != last_loaded_y) {
+            file.offset = file_hdr.off_bits + source_y * bmp_row_size;
+            if (fs::VFS::read(&file, line_buffer, bmp_row_size) != (ssize_t)bmp_row_size) {
+                return false;
+            }
+            last_loaded_y = source_y;
+        }
+
+        uint32_t dest_row = sy * sc_w;
+        uint32_t bmp_x_accum = 0;
+
+        for (uint32_t sx = 0; sx < sc_w; ++sx) {
+            uint32_t bmp_x = bmp_x_accum >> 16;
+            if (bmp_x >= (uint32_t)bmp_w) bmp_x = bmp_w - 1;
+
+            uint32_t src_idx = bmp_x * bytes_per_pixel;
+            uint8_t b = line_buffer[src_idx];
+            uint8_t g = line_buffer[src_idx + 1];
+            uint8_t r = line_buffer[src_idx + 2];
+
+            wallpaper_cache[dest_row + sx] = (r << 16) | (g << 8) | b;
+            bmp_x_accum += x_ratio;
+        }
+    }
+
+    return true;
+}
+
 void Framebuffer::update_wallpaper_cache() {
     if (!initialized || !wallpaper_cache) return;
     
     Rect old_clip = clip_rect;
     clip_rect = {0, 0, (int)width, (int)height};
     
-    generate_wallpaper_procedural(wallpaper_cache);
+    bool bmp_loaded = false;
+    if (wallpaper_theme_id == 0) {
+        bmp_loaded = load_bmp_wallpaper("/tar/wallpaper.bmp");
+        if (!bmp_loaded) {
+            bmp_loaded = load_bmp_wallpaper("/disk/wallpaper.bmp");
+        }
+    }
+    
+    if (!bmp_loaded) {
+        generate_wallpaper_procedural(wallpaper_cache);
+    }
     
     clip_rect = old_clip;
 }

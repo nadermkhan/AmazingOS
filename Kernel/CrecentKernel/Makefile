@@ -34,6 +34,8 @@ $(TARGET_ELF): $(TARGET_PE)
 		--change-section-lma .rdata-0x80000000 \
 		--change-section-lma .data-0x80000000 \
 		--change-section-lma .bss-0x80000000 \
+		--change-section-lma .ctors-0x80000000 \
+		--change-section-lma .reloc-0x80000000 \
 		$(TARGET_PE) $(TARGET_ELF)
 
 # Object files rules

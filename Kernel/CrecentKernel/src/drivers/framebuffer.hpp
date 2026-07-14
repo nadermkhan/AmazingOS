@@ -15,6 +15,28 @@ struct Rect {
     }
 };
 
+struct __attribute__((packed)) BmpFileHeader {
+    uint16_t type;          // Magic number 'BM'
+    uint32_t size;          // File size
+    uint16_t reserved1;
+    uint16_t reserved2;
+    uint32_t off_bits;      // Offset to image data
+};
+
+struct __attribute__((packed)) BmpInfoHeader {
+    uint32_t size;
+    int32_t  width;
+    int32_t  height;
+    uint16_t planes;
+    uint16_t bit_count;     // 24 or 32
+    uint32_t compression;
+    uint32_t size_image;
+    int32_t  x_pels_per_meter;
+    int32_t  y_pels_per_meter;
+    uint32_t clr_used;
+    uint32_t clr_important;
+};
+
 class Framebuffer {
 private:
     static uint64_t physical_base;
@@ -32,6 +54,7 @@ private:
     static void update_wallpaper_cache();
 
 public:
+    static bool load_bmp_wallpaper(const char* path);
     static void set_clip_rect(Rect r);
     static void clear_clip_rect();
     static Rect get_clip_rect() { return clip_rect; }
