@@ -2329,8 +2329,8 @@ void WindowManager::force_redraw_all() {
     drivers::Framebuffer::clear_clip_rect();
     draw_wallpaper();
     draw_desktop_icons();
-    draw_mac_decorations();
     draw_all_windows();
+    draw_mac_decorations();
     draw_cursor(); // Draw cursor to back buffer (RAM)
     drivers::Framebuffer::swap_buffers();
 }
@@ -3382,8 +3382,8 @@ void WindowManager::redraw_dirty_list(const DirtyList& list) {
         drivers::Framebuffer::set_clip_rect(r);
         draw_wallpaper();
         draw_desktop_icons();
-        draw_mac_decorations();
         draw_all_windows();
+        draw_mac_decorations();
         draw_cursor();
     }
     drivers::Framebuffer::clear_clip_rect();
