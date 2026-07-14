@@ -208,6 +208,12 @@ static int str_len(const char* s) {
     while (s[len]) len++;
     return len;
 }
+static bool ends_with(const char* s, const char* suffix) {
+    int s_len = str_len(s);
+    int suf_len = str_len(suffix);
+    if (s_len < suf_len) return false;
+    return str_equal(s + s_len - suf_len, suffix);
+}
 
 static void str_copy(char* dest, const char* src, size_t max_len) {
     if (!dest || !src) return;
@@ -430,6 +436,14 @@ float WindowManager::ui_scale = 1.0f;
 bool WindowManager::dark_mode = false;
 int WindowManager::wallpaper_theme_id = 0;
 int WindowManager::current_theme = 0;
+
+bool WindowManager::audio_playing = false;
+char WindowManager::audio_current_song[128] = "";
+WindowManager::SongNote WindowManager::audio_notes[256] = {};
+int WindowManager::audio_note_idx = 0;
+int WindowManager::audio_note_count = 0;
+uint32_t WindowManager::audio_note_end_frame = 0;
+int WindowManager::audio_visualizer_seed = 0;
 
 // ---------------------------------------------------------------------------
 // String helpers
@@ -1392,6 +1406,10 @@ void Window::draw(bool is_active) {
                 WindowManager::draw_notes_content(this);
             } else if (this->title_starts_with("Code Editor")) {
                 WindowManager::draw_code_editor_content(this);
+            } else if (this->title_starts_with("Audio Player")) {
+                WindowManager::draw_audio_player_content(this);
+            } else if (this->title_starts_with("Picture Viewer")) {
+                WindowManager::draw_picture_viewer_content(this);
             } else if (this->title_is("System Settings")) {
                 WindowManager::draw_settings_content(this);
             } else {
@@ -1605,6 +1623,10 @@ void WindowManager::close_window(int id) {
         curr = curr->next;
     }
     if (!curr) return;
+
+    if (curr->title_starts_with("Audio Player")) {
+        audio_stop();
+    }
 
     if (prev) prev->next = curr->next;
     else window_list_head = curr->next;
@@ -3334,6 +3356,30 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                             drivers::Serial::println("[WIFI] Network Direct-OS-Printer status changed: Connected.");
                             trigger_host_persist();
                         }
+                    } else if (clicked->title_starts_with("Audio Player")) {
+                        int w = clicked->rect.w - 2;
+                        int play_x = w / 2 - 90;
+                        int pause_x = w / 2 - 25;
+                        int stop_x = w / 2 + 40;
+                        int btn_y = 115;
+                        int btn_w = 50;
+                        int btn_h = 30;
+
+                        if (ry >= btn_y && ry < btn_y + btn_h) {
+                            if (rx >= play_x && rx < play_x + btn_w) {
+                                if (audio_note_count > 0) {
+                                    audio_playing = true;
+                                    audio_play_frequency(audio_notes[audio_note_idx].freq);
+                                    audio_note_end_frame = frame_counter + audio_notes[audio_note_idx].duration;
+                                }
+                            } else if (rx >= pause_x && rx < pause_x + btn_w) {
+                                audio_playing = false;
+                                audio_play_frequency(0);
+                            } else if (rx >= stop_x && rx < stop_x + btn_w) {
+                                audio_stop();
+                                audio_note_idx = 0;
+                            }
+                        }
                     } else if (clicked->title_is("Safari")) {
                         int client_w = clicked->rect.w - 2;
                         bool link_clicked = false;
@@ -3519,6 +3565,15 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                                     create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
                                                 } else if (str_equal(it.name, "System Settings")) {
                                                     create_window((width - 500)/2, (height - 420)/2, 500, 420, "System Settings", 0x00FFFFFF);
+                                                } else if (ends_with(it.name, ".bmp")) {
+                                                    char pic_title[256] = "Picture Viewer - ";
+                                                    str_copy(pic_title + 17, full_path, 230);
+                                                    create_window((width - 450)/2, (height - 380)/2, 450, 380, pic_title, 0x00FFFFFF);
+                                                } else if (ends_with(it.name, ".sng")) {
+                                                    char audio_title[256] = "Audio Player - ";
+                                                    str_copy(audio_title + 15, full_path, 230);
+                                                    create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
+                                                    load_sng_file(full_path);
                                                 } else {
                                                     Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
                                                     if (code_win) {
@@ -3726,40 +3781,52 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                 }
                                 it.selected = true;
 
-                                if (is_double_click) {
+                                 if (is_double_click) {
                                     if (it.is_terminal) {
                                         create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
                                     } else if (str_equal(it.name, "System Settings")) {
                                         create_window((width - 500)/2, (height - 420)/2, 500, 420, "System Settings", 0x00FFFFFF);
                                     } else {
-                                        char edit_title[128] = "Code Editor - /";
-                                        int t_idx = 15;
-                                        int n_idx = 0;
-                                        while (it.name[n_idx]) { edit_title[t_idx++] = it.name[n_idx++]; }
-                                        edit_title[t_idx] = '\0';
-                                        
-                                        Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
-                                        if (code_win) {
-                                            char full_path[128] = "/";
-                                            if (str_equal(it.name, "hello.txt")) {
-                                                const char* hello_p = "tar/hello.txt";
-                                                int hp_idx = 0;
-                                                while (hello_p[hp_idx]) { full_path[1 + hp_idx] = hello_p[hp_idx]; hp_idx++; }
-                                                full_path[1 + hp_idx] = '\0';
-                                            } else {
-                                                int n_idx2 = 0;
-                                                while (it.name[n_idx2]) { full_path[1 + n_idx2] = it.name[n_idx2]; n_idx2++; }
-                                                full_path[1 + n_idx2] = '\0';
-                                            }
-                                            fs::VFSNode* node = fs::VFS::open(full_path);
-                                            if (node) {
-                                                fs::File f;
-                                                f.node = node;
-                                                f.offset = 0;
-                                                ssize_t bytes = fs::VFS::read(&f, code_win->text_input, sizeof(code_win->text_input) - 1);
-                                                if (bytes > 0) {
-                                                    code_win->text_input[bytes] = '\0';
-                                                    code_win->text_len = bytes;
+                                        char full_path[128] = "/";
+                                        if (str_equal(it.name, "hello.txt")) {
+                                            const char* hello_p = "tar/hello.txt";
+                                            int hp_idx = 0;
+                                            while (hello_p[hp_idx]) { full_path[1 + hp_idx] = hello_p[hp_idx]; hp_idx++; }
+                                            full_path[1 + hp_idx] = '\0';
+                                        } else {
+                                            int n_idx2 = 0;
+                                            while (it.name[n_idx2]) { full_path[1 + n_idx2] = it.name[n_idx2]; n_idx2++; }
+                                            full_path[1 + n_idx2] = '\0';
+                                        }
+
+                                        if (ends_with(it.name, ".bmp")) {
+                                            char pic_title[256] = "Picture Viewer - ";
+                                            str_copy(pic_title + 17, full_path, 230);
+                                            create_window((width - 450)/2, (height - 380)/2, 450, 380, pic_title, 0x00FFFFFF);
+                                        } else if (ends_with(it.name, ".sng")) {
+                                            char audio_title[256] = "Audio Player - ";
+                                            str_copy(audio_title + 15, full_path, 230);
+                                            create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
+                                            load_sng_file(full_path);
+                                        } else {
+                                            char edit_title[128] = "Code Editor - /";
+                                            int t_idx = 15;
+                                            int n_idx = 0;
+                                            while (it.name[n_idx]) { edit_title[t_idx++] = it.name[n_idx++]; }
+                                            edit_title[t_idx] = '\0';
+                                            
+                                            Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
+                                            if (code_win) {
+                                                fs::VFSNode* node = fs::VFS::open(full_path);
+                                                if (node) {
+                                                    fs::File f;
+                                                    f.node = node;
+                                                    f.offset = 0;
+                                                    ssize_t bytes = fs::VFS::read(&f, code_win->text_input, sizeof(code_win->text_input) - 1);
+                                                    if (bytes > 0) {
+                                                        code_win->text_input[bytes] = '\0';
+                                                        code_win->text_len = bytes;
+                                                    }
                                                 }
                                             }
                                         }
@@ -4131,6 +4198,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
 }
 
 void WindowManager::tick() {
+    audio_tick();
     frame_counter++;
     if (frame_counter % 60 == 0) {
         for (int i = 0; i < 19; i++) {
@@ -4542,6 +4610,265 @@ void WindowManager::draw_settings_content(Window* win) {
         int tw = get_string_width("Connect", scale_font(12.0f));
         draw_string("Connect", bx + (bw - tw)/2, by + scale_dim(4), C_WHITE, 12.0f);
     }
+}
+
+void WindowManager::audio_play_frequency(uint32_t freq) {
+    if (freq == 0) {
+        uint8_t tmp = drivers::inb(0x61) & 0xFC;
+        drivers::outb(0x61, tmp);
+    } else {
+        uint32_t div = 1193180 / freq;
+        drivers::outb(0x43, 0xB6);
+        drivers::outb(0x42, (uint8_t)(div & 0xFF));
+        drivers::outb(0x42, (uint8_t)((div >> 8) & 0xFF));
+        
+        uint8_t tmp = drivers::inb(0x61);
+        if ((tmp & 3) != 3) {
+            drivers::outb(0x61, tmp | 3);
+        }
+    }
+}
+
+void WindowManager::audio_stop() {
+    audio_playing = false;
+    audio_play_frequency(0);
+}
+
+void WindowManager::audio_tick() {
+    if (!audio_playing) return;
+    
+    if ((uint32_t)frame_counter >= audio_note_end_frame) {
+        audio_note_idx++;
+        if (audio_note_idx >= audio_note_count) {
+            audio_stop();
+        } else {
+            audio_play_frequency(audio_notes[audio_note_idx].freq);
+            audio_note_end_frame = frame_counter + audio_notes[audio_note_idx].duration;
+        }
+    }
+}
+
+void WindowManager::load_sng_file(const char* path) {
+    audio_stop();
+    audio_note_idx = 0;
+    audio_note_count = 0;
+    
+    // Extract base name for song details
+    int last_s = -1;
+    for (int i = 0; path[i] != '\0'; i++) {
+        if (path[i] == '/') last_s = i;
+    }
+    const char* base = (last_s != -1) ? path + last_s + 1 : path;
+    str_copy(audio_current_song, base, sizeof(audio_current_song));
+
+    fs::VFSNode* node = fs::VFS::open(path);
+    if (!node) return;
+    
+    char file_buf[4096];
+    fs::File f;
+    f.node = node;
+    f.offset = 0;
+    ssize_t bytes = fs::VFS::read(&f, file_buf, sizeof(file_buf) - 1);
+    if (bytes <= 0) return;
+    file_buf[bytes] = '\0';
+
+    int idx = 0;
+    int len = bytes;
+    while (idx < len && audio_note_count < 256) {
+        if (file_buf[idx] == '#') {
+            while (idx < len && file_buf[idx] != '\n') idx++;
+            continue;
+        }
+        if (file_buf[idx] == ' ' || file_buf[idx] == '\n' || file_buf[idx] == '\r' || file_buf[idx] == '\t') {
+            idx++;
+            continue;
+        }
+
+        uint32_t freq = 0;
+        while (idx < len && file_buf[idx] >= '0' && file_buf[idx] <= '9') {
+            freq = freq * 10 + (file_buf[idx] - '0');
+            idx++;
+        }
+        
+        while (idx < len && (file_buf[idx] == ' ' || file_buf[idx] == '\t')) idx++;
+
+        uint32_t dur = 0;
+        while (idx < len && file_buf[idx] >= '0' && file_buf[idx] <= '9') {
+            dur = dur * 10 + (file_buf[idx] - '0');
+            idx++;
+        }
+
+        if (dur > 0) {
+            audio_notes[audio_note_count].freq = freq;
+            audio_notes[audio_note_count].duration = dur;
+            audio_note_count++;
+        }
+    }
+}
+
+void WindowManager::draw_audio_player_content(Window* win) {
+    int x = win->rect.x;
+    int y = win->rect.y;
+    int w = win->rect.w - 2;
+    int h = win->rect.h - TITLE_BAR_HEIGHT - 12;
+
+    // Translucent dark card style background
+    uint32_t card_bg = dark_mode ? 0x000F172A : 0x00F8FAFC;
+    uint32_t text_color = dark_mode ? 0x00FFFFFF : 0x000F172A;
+    
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + 10, y + TITLE_BAR_HEIGHT + 10, w - 20, h - 20, 10, card_bg, 255);
+
+    // Draw details
+    draw_string("Crecent Audio Player", x + 30, y + TITLE_BAR_HEIGHT + 25, 0x000F52BA, 16.0f);
+    
+    char track_msg[128] = "Track: ";
+    if (audio_current_song[0] != '\0') {
+        str_copy(track_msg + 7, audio_current_song, 100);
+    } else {
+        str_copy(track_msg + 7, "None Loaded", 100);
+    }
+    draw_string(track_msg, x + 30, y + TITLE_BAR_HEIGHT + 55, text_color, 14.0f);
+
+    // Draw progress bar
+    int bar_y = y + TITLE_BAR_HEIGHT + 85;
+    int bar_w = w - 60;
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + 30, bar_y, bar_w, 8, 4, 0x00CBD5E1, 255);
+    if (audio_note_count > 0) {
+        int progress_w = (audio_note_idx * bar_w) / audio_note_count;
+        if (progress_w > bar_w) progress_w = bar_w;
+        drivers::Framebuffer::draw_rounded_rect_alpha(x + 30, bar_y, progress_w, 8, 4, 0x000F52BA, 255);
+    }
+
+    // Playback control buttons
+    int play_x = w / 2 - 90;
+    int pause_x = w / 2 - 25;
+    int stop_x = w / 2 + 40;
+    int btn_y = y + TITLE_BAR_HEIGHT + 115;
+    int btn_w = 50;
+    int btn_h = 30;
+
+    // Play
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + play_x, btn_y, btn_w, btn_h, 6, 0x000F52BA, 255);
+    draw_string("Play", x + play_x + 12, btn_y + 8, C_WHITE, 13.0f);
+
+    // Pause
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + pause_x, btn_y, btn_w, btn_h, 6, 0x0064748B, 255);
+    draw_string("Pause", x + pause_x + 8, btn_y + 8, C_WHITE, 13.0f);
+
+    // Stop
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + stop_x, btn_y, btn_w, btn_h, 6, 0x00EF4444, 255);
+    draw_string("Stop", x + stop_x + 12, btn_y + 8, C_WHITE, 13.0f);
+
+    // Equalizer bars
+    int eq_y = y + TITLE_BAR_HEIGHT + 165;
+    int bar_width = 10;
+    int bar_spacing = 15;
+    int bars_count = 8;
+    int total_bars_w = bars_count * bar_width + (bars_count - 1) * bar_spacing;
+    int start_eq_x = x + (w - total_bars_w) / 2;
+
+    for (int i = 0; i < bars_count; ++i) {
+        int bar_h = 6;
+        if (audio_playing) {
+            // Animate using frame counter with zero floating point overhead
+            int anim = (frame_counter * (i + 1) * 3) % 45;
+            bar_h = 6 + anim;
+        }
+        int bx = start_eq_x + i * (bar_width + bar_spacing);
+        int by = eq_y + 50 - bar_h;
+        drivers::Framebuffer::draw_rounded_rect_alpha(bx, by, bar_width, bar_h, 3, 0x0010B981, 255);
+    }
+}
+
+void WindowManager::draw_picture_viewer_content(Window* win) {
+    int x = win->rect.x;
+    int y = win->rect.y;
+    int w = win->rect.w - 2;
+    int h = win->rect.h - TITLE_BAR_HEIGHT - 12;
+
+    const char* path = win->title + 17; // Extract path after "Picture Viewer - "
+    fs::VFSNode* node = fs::VFS::open(path);
+    if (!node) {
+        draw_string("Failed to open image.", x + 20, y + TITLE_BAR_HEIGHT + 20, C_TEXT, 15.0f);
+        return;
+    }
+    
+    // Safety check: 2MB cap
+    if (node->size > 2 * 1024 * 1024) {
+        draw_string("Image exceeds 2MB safety limit.", x + 20, y + TITLE_BAR_HEIGHT + 20, C_TEXT, 15.0f);
+        return;
+    }
+
+    char header[54];
+    fs::File f;
+    f.node = node;
+    f.offset = 0;
+    fs::VFS::read(&f, header, 54);
+
+    if (header[0] != 'B' || header[1] != 'M') {
+        draw_string("Invalid BMP format.", x + 20, y + TITLE_BAR_HEIGHT + 20, C_TEXT, 15.0f);
+        return;
+    }
+
+    int bmp_w = *(int*)&header[18];
+    int bmp_h = *(int*)&header[22];
+    int bpp = *(short*)&header[28];
+    int compression = *(int*)&header[30];
+    int data_offset = *(int*)&header[10];
+
+    if (compression != 0 || (bpp != 24 && bpp != 32)) {
+        draw_string("Only uncompressed 24-bit/32-bit BMPs supported.", x + 20, y + TITLE_BAR_HEIGHT + 20, C_TEXT, 15.0f);
+        return;
+    }
+
+    int row_stride = ((bmp_w * bpp + 31) / 32) * 4;
+    int pixel_data_size = row_stride * bmp_h;
+
+    uint8_t* pixel_data = (uint8_t*)kernel::kmalloc(pixel_data_size);
+    if (!pixel_data) {
+        draw_string("Kernel heap memory allocation failed.", x + 20, y + TITLE_BAR_HEIGHT + 20, C_TEXT, 15.0f);
+        return;
+    }
+
+    f.offset = data_offset;
+    fs::VFS::read(&f, pixel_data, pixel_data_size);
+
+    int start_x = x + 1;
+    int start_y = y + TITLE_BAR_HEIGHT;
+
+    uint32_t y_ratio = (bmp_h << 16) / h;
+    uint32_t x_ratio = (bmp_w << 16) / w;
+
+    Rect clip = drivers::Framebuffer::get_clip_rect();
+
+    for (int sy = 0; sy < h; ++sy) {
+        int dy = start_y + sy;
+        if (dy < clip.y || dy >= clip.y + clip.h) continue;
+
+        uint32_t bmp_y = (sy * y_ratio) >> 16;
+        uint32_t row_y = bmp_h - 1 - bmp_y;
+        uint8_t* bmp_row = pixel_data + row_y * row_stride;
+
+        uint32_t bmp_x_accum = 0;
+        for (int sx = 0; sx < w; ++sx) {
+            int dx = start_x + sx;
+            if (dx >= clip.x && dx < clip.x + clip.w) {
+                uint32_t bmp_x = bmp_x_accum >> 16;
+                uint32_t color = 0;
+                if (bpp == 24) {
+                    uint8_t* p = bmp_row + bmp_x * 3;
+                    color = (p[2] << 16) | (p[1] << 8) | p[0];
+                } else if (bpp == 32) {
+                    uint8_t* p = bmp_row + bmp_x * 4;
+                    color = (p[2] << 16) | (p[1] << 8) | p[0];
+                }
+                drivers::Framebuffer::draw_pixel(dx, dy, color);
+            }
+            bmp_x_accum += x_ratio;
+        }
+    }
+
+    kernel::kfree(pixel_data);
 }
 
 } // namespace wm

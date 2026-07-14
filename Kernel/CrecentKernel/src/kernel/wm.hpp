@@ -108,6 +108,12 @@ private:
     static void draw_appstore_content(Window* win);
     static void draw_notes_content(Window* win);
     static void draw_code_editor_content(Window* win);
+    static void draw_audio_player_content(Window* win);
+    static void draw_picture_viewer_content(Window* win);
+    static void load_sng_file(const char* path);
+    static void audio_play_frequency(uint32_t freq);
+    static void audio_stop();
+    static void audio_tick();
     static void draw_drag_preview();
     static void draw_window_client_area(Window* win);
     static void minimize_window_animated(Window* win);
@@ -121,6 +127,18 @@ private:
     static void redraw_dirty_list(const DirtyList& list);
 
     static void int_to_str(int v, char* buf, int len);
+
+    struct SongNote {
+        uint32_t freq;
+        uint32_t duration;
+    };
+    static bool audio_playing;
+    static char audio_current_song[128];
+    static SongNote audio_notes[256];
+    static int audio_note_idx;
+    static int audio_note_count;
+    static uint32_t audio_note_end_frame;
+    static int audio_visualizer_seed;
 
     static int perf_cpu_history[20];
     static int perf_current_cpu;
