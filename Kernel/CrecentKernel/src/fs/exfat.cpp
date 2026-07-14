@@ -217,6 +217,7 @@ VFSNode* Exfat::finddir(VFSNode* node, const char* name) {
                         new_node->read = Exfat::read;
                         new_node->write = Exfat::write;
                         new_node->finddir = Exfat::finddir;
+                        new_node->readdir = Exfat::readdir;
 
                         exfat_nodes[exfat_node_count++] = new_node;
                         matched_node = new_node;
@@ -369,6 +370,118 @@ ssize_t Exfat::write(VFSNode* node, size_t offset, const void* buffer, size_t co
     return (ssize_t)bytes_written;
 }
 
+int Exfat::readdir(VFSNode* node, size_t index, VFSNode* entry_out) {
+    if (!node || node->type != NodeType::DIRECTORY) return -1;
+
+    ExfatFileInfo* info = (ExfatFileInfo*)node->data;
+    uint32_t current_cluster = info->first_cluster;
+
+    alignas(16) uint8_t cluster_buf[4096];
+    char file_name_buf[256];
+    int file_name_len = 0;
+
+    bool entry_set_active = false;
+    uint16_t file_attributes = 0;
+    uint32_t entry_first_cluster = 0;
+    uint8_t  entry_flags = 0;
+    uint64_t entry_data_length = 0;
+
+    size_t unique_count = 0;
+    bool has_completed_entry = false;
+
+    bool end_of_directory = false;
+    while (current_cluster < 0xFFFFFFF8) {
+        uint64_t sector = cluster_heap_start_sector + (current_cluster - 2) * sectors_per_cluster;
+        if (!drivers::Ahci::read_sectors(sector, sectors_per_cluster, cluster_buf)) {
+            return -1;
+        }
+
+        for (uint32_t offset = 0; offset < cluster_size; offset += 32) {
+            ExfatDirHeader* header = (ExfatDirHeader*)(cluster_buf + offset);
+
+            if (header->entry_type == 0x00) {
+                end_of_directory = true;
+                break; // End of directory
+            }
+
+            if (header->entry_type == 0x85) {
+                if (entry_set_active && file_name_len > 0) {
+                    if (unique_count == index) {
+                        has_completed_entry = true;
+                        break;
+                    }
+                    unique_count++;
+                }
+
+                ExfatFileEntry* file = (ExfatFileEntry*)header;
+                file_attributes = file->file_attributes;
+                entry_set_active = true;
+                file_name_len = 0;
+                file_name_buf[0] = '\0';
+                continue;
+            }
+
+            if (header->entry_type == 0xC0 && entry_set_active) {
+                ExfatStreamEntry* stream = (ExfatStreamEntry*)header;
+                entry_flags = stream->flags;
+                entry_first_cluster = stream->first_cluster;
+                entry_data_length = stream->data_length;
+                continue;
+            }
+
+            if (header->entry_type == 0xC1 && entry_set_active) {
+                ExfatNameEntry* name_entry = (ExfatNameEntry*)header;
+                for (int i = 0; i < 15; i++) {
+                    uint16_t uchar = name_entry->name_part[i];
+                    if (uchar == 0) break;
+                    if (file_name_len < 254) {
+                        file_name_buf[file_name_len++] = (char)(uchar & 0xFF);
+                    }
+                }
+                file_name_buf[file_name_len] = '\0';
+                continue;
+            }
+        }
+
+        if (end_of_directory || has_completed_entry) {
+            break;
+        }
+
+        current_cluster = get_next_cluster(current_cluster);
+    }
+
+    if (entry_set_active && file_name_len > 0 && unique_count == index) {
+        has_completed_entry = true;
+    }
+
+    if (has_completed_entry) {
+        // Safe string copy
+        int idx = 0;
+        for (; idx < file_name_len && idx < 127; idx++) {
+            entry_out->name[idx] = file_name_buf[idx];
+        }
+        entry_out->name[idx] = '\0';
+
+        entry_out->type = (file_attributes & 0x10) ? NodeType::DIRECTORY : NodeType::FILE;
+        entry_out->size = entry_data_length;
+        entry_out->capacity = entry_data_length;
+        
+        ExfatFileInfo* node_info = new ExfatFileInfo();
+        node_info->first_cluster = entry_first_cluster;
+        node_info->flags = entry_flags;
+        node_info->size = entry_data_length;
+        entry_out->data = (char*)node_info;
+
+        entry_out->read = Exfat::read;
+        entry_out->write = Exfat::write;
+        entry_out->finddir = Exfat::finddir;
+        entry_out->readdir = Exfat::readdir;
+        return 1;
+    }
+
+    return 0; // End of directory
+}
+
 bool Exfat::init(uint64_t partition_lba) {
     partition_start_lba = partition_lba;
     
@@ -426,6 +539,7 @@ bool Exfat::init(uint64_t partition_lba) {
     exfat_root_node.read = Exfat::read;
     exfat_root_node.write = Exfat::write;
     exfat_root_node.finddir = Exfat::finddir;
+    exfat_root_node.readdir = Exfat::readdir;
 
     return true;
 }

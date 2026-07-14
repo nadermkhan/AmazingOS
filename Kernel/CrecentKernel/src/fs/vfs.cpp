@@ -103,6 +103,53 @@ VFSNode* finddir_root(VFSNode* node, const char* name) {
     return nullptr;
 }
 
+int root_readdir(VFSNode* node, size_t index, VFSNode* entry_out) {
+    if (!node || node->type != NodeType::DIRECTORY) return -1;
+    
+    size_t current_idx = 0;
+    
+    // 1. Yield mounts (except root "/" itself)
+    for (size_t i = 0; i < VFS::mount_count; ++i) {
+        if (str_equal(VFS::mounts[i].path, "/")) continue;
+        if (current_idx == index) {
+            const char* name_ptr = VFS::mounts[i].path;
+            if (name_ptr[0] == '/') name_ptr++;
+            str_copy(entry_out->name, name_ptr, sizeof(entry_out->name));
+            entry_out->type = NodeType::DIRECTORY;
+            entry_out->size = 0;
+            entry_out->capacity = 0;
+            entry_out->data = nullptr;
+            entry_out->read = nullptr;
+            entry_out->write = nullptr;
+            entry_out->finddir = nullptr;
+            entry_out->readdir = nullptr;
+            return 1;
+        }
+        current_idx++;
+    }
+    
+    // 2. Yield RAM overlay nodes that are top-level files (no slashes in name)
+    for (size_t i = 0; i < VFS::node_count; ++i) {
+        const char* name_ptr = VFS::child_nodes[i].name;
+        bool has_slash = false;
+        for (int j = 0; name_ptr[j] != '\0'; j++) {
+            if (name_ptr[j] == '/') {
+                has_slash = true;
+                break;
+            }
+        }
+        if (has_slash) continue;
+        
+        if (current_idx == index) {
+            *entry_out = VFS::child_nodes[i];
+            return 1;
+        }
+        current_idx++;
+    }
+    
+    return 0; // End of directory
+}
+
 } // namespace anonymous
 
 bool VFS::init() {
@@ -115,6 +162,7 @@ bool VFS::init() {
     root_node.read = nullptr;
     root_node.write = nullptr;
     root_node.finddir = finddir_root;
+    root_node.readdir = root_readdir;
 
     node_count = 0;
     mount_count = 0;

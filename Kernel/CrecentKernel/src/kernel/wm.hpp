@@ -2,6 +2,7 @@
 
 #include "types.hpp"
 #include "../drivers/framebuffer.hpp"
+#include "../fs/vfs.hpp"
 
 namespace wm {
 
@@ -35,6 +36,14 @@ public:
     char text_input[1024];
     int text_len;
     int selected_item_idx;
+
+    // Finder VFS Cache
+    static constexpr int FINDER_MAX_ITEMS = 64;
+    fs::VFSNode finder_items[FINDER_MAX_ITEMS];
+    int finder_item_count;
+    bool finder_needs_reload;
+    bool finder_list_view_mode;
+    bool finder_editing_path;
 
     Window(int id, int x, int y, int w, int h, const char* title, uint32_t color);
     void draw(bool is_active);
@@ -100,6 +109,9 @@ private:
     static void draw_window_body(Window* win, uint8_t alpha, bool is_terminal);
     static void draw_terminal_content(Window* win);
     static void draw_finder_content(Window* win);
+    static void populate_finder_cache(Window* win);
+    static void rename_item(const char* parent_path, const char* old_name, const char* new_name);
+    static void delete_finder_item(const char* parent_path, const char* name, bool is_directory);
     static void draw_system_log_content(Window* win);
     static void draw_perf_monitor_content(Window* win);
     static void draw_about_content(Window* win);

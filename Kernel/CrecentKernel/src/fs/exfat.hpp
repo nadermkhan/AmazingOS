@@ -80,6 +80,7 @@ public:
     static ssize_t read(VFSNode* node, size_t offset, void* buffer, size_t count);
     static ssize_t write(VFSNode* node, size_t offset, const void* buffer, size_t count);
     static VFSNode* finddir(VFSNode* node, const char* name);
+    static int readdir(VFSNode* node, size_t index, VFSNode* entry_out);
 };
 
 } // namespace fs

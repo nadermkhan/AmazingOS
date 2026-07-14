@@ -12,6 +12,8 @@ extern "C" void* memcpy(void* dest, const void* src, size_t n);
 
 namespace wm {
 
+static void get_vfs_path(const char* active_dir, const char* name, char* out_path);
+
 // ---------------------------------------------------------------------------
 // WhiteSur palette (all colours are 0x00RRGGBB)
 // ---------------------------------------------------------------------------
@@ -80,6 +82,7 @@ static int clipboard_item_idx = -1;
 static bool clipboard_is_cut = false;
 static char clipboard_path[256] = "";
 static bool is_renaming_item = false;
+static char rename_original_name[128] = "";
 
 static uint32_t last_finder_click_time = 0;
 static int last_finder_clicked_item_idx = -1;
@@ -161,6 +164,10 @@ Window::Window(int id, int x, int y, int w, int h, const char* title, uint32_t c
     this->text_len = 0;
     this->text_input[0] = '\0';
     this->selected_item_idx = -1;
+    this->finder_item_count = 0;
+    this->finder_needs_reload = true;
+    this->finder_list_view_mode = false;
+    this->finder_editing_path = false;
 }
 
 bool Window::title_is(const char* s) {
@@ -665,7 +672,153 @@ void WindowManager::draw_terminal_content(Window* win) {
     draw_string(prompt_line, x + 12, y + prompt_y + terminal_line_count * line_h, C_WHITE, 15.0f);
 }
 
+void WindowManager::rename_item(const char* parent_path, const char* old_name, const char* new_name) {
+    for (int i = 0; i < desktop_item_count; i++) {
+        if (str_equal(desktop_items[i].path, parent_path) && str_equal(desktop_items[i].name, old_name)) {
+            str_copy(desktop_items[i].name, new_name, sizeof(desktop_items[i].name));
+            break;
+        }
+    }
+
+    char old_vfs_path[256];
+    get_vfs_path(parent_path, old_name, old_vfs_path);
+    const char* rel_old = old_vfs_path;
+    if (old_vfs_path[0] == '/') rel_old = old_vfs_path + 1;
+
+    char new_vfs_path[256];
+    get_vfs_path(parent_path, new_name, new_vfs_path);
+    const char* rel_new = new_vfs_path;
+    if (new_vfs_path[0] == '/') rel_new = new_vfs_path + 1;
+
+    for (size_t i = 0; i < fs::VFS::node_count; ++i) {
+        if (str_equal(fs::VFS::child_nodes[i].name, rel_old)) {
+            str_copy(fs::VFS::child_nodes[i].name, rel_new, sizeof(fs::VFS::child_nodes[i].name));
+            break;
+        }
+    }
+}
+
+void WindowManager::delete_finder_item(const char* parent_path, const char* name, bool is_directory) {
+    for (int i = 0; i < desktop_item_count; i++) {
+        if (str_equal(desktop_items[i].path, parent_path) && str_equal(desktop_items[i].name, name)) {
+            for (int j = i; j < desktop_item_count - 1; j++) {
+                desktop_items[j] = desktop_items[j + 1];
+            }
+            desktop_item_count--;
+            break;
+        }
+    }
+
+    char vfs_path[256];
+    get_vfs_path(parent_path, name, vfs_path);
+    const char* rel_path = vfs_path;
+    if (vfs_path[0] == '/') rel_path = vfs_path + 1;
+
+    for (size_t i = 0; i < fs::VFS::node_count; ++i) {
+        if (str_equal(fs::VFS::child_nodes[i].name, rel_path)) {
+            if (fs::VFS::child_nodes[i].data) {
+                kernel::kfree(fs::VFS::child_nodes[i].data);
+            }
+            for (size_t j = i; j < fs::VFS::node_count - 1; ++j) {
+                fs::VFS::child_nodes[j] = fs::VFS::child_nodes[j + 1];
+            }
+            fs::VFS::node_count--;
+            break;
+        }
+    }
+
+    if (is_directory) {
+        char prefix[256];
+        str_copy(prefix, rel_path, 256);
+        size_t len = str_len(prefix);
+        prefix[len++] = '/';
+        prefix[len] = '\0';
+        for (size_t i = 0; i < fs::VFS::node_count; ) {
+            if (title_starts_with_custom(fs::VFS::child_nodes[i].name, prefix)) {
+                if (fs::VFS::child_nodes[i].data) {
+                    kernel::kfree(fs::VFS::child_nodes[i].data);
+                }
+                for (size_t j = i; j < fs::VFS::node_count - 1; ++j) {
+                    fs::VFS::child_nodes[j] = fs::VFS::child_nodes[j + 1];
+                }
+                fs::VFS::node_count--;
+            } else {
+                i++;
+            }
+        }
+
+        char d_prefix[256];
+        str_copy(d_prefix, parent_path, 256);
+        size_t d_len = str_len(d_prefix);
+        if (d_len > 0 && d_prefix[d_len - 1] != '/') {
+            d_prefix[d_len++] = '/';
+        }
+        str_copy(d_prefix + d_len, name, 256 - d_len);
+        for (int i = 0; i < desktop_item_count; ) {
+            if (title_starts_with_custom(desktop_items[i].path, d_prefix)) {
+                for (int j = i; j < desktop_item_count - 1; j++) {
+                    desktop_items[j] = desktop_items[j + 1];
+                }
+                desktop_item_count--;
+            } else {
+                i++;
+            }
+        }
+    }
+}
+
+void WindowManager::populate_finder_cache(Window* win) {
+    if (!win) return;
+    
+    win->finder_item_count = 0;
+    win->finder_needs_reload = false;
+
+    const char* active_dir = win->text_input;
+    if (win->text_len == 0) {
+        active_dir = "Desktop";
+    }
+
+    if (active_dir[0] == '/') {
+        // Real VFS directory
+        fs::VFSNode* dir_node = fs::VFS::open(active_dir);
+        if (dir_node && dir_node->type == fs::NodeType::DIRECTORY && dir_node->readdir) {
+            fs::VFSNode entry;
+            size_t idx = 0;
+            while (idx < Window::FINDER_MAX_ITEMS) {
+                int res = dir_node->readdir(dir_node, idx, &entry);
+                if (res <= 0) break;
+                
+                win->finder_items[win->finder_item_count++] = entry;
+                idx++;
+            }
+        }
+    } else {
+        // Virtual folder (Desktop, Applications, Documents, USB_DRIVE)
+        for (int i = 0; i < desktop_item_count; i++) {
+            DiskItem& it = desktop_items[i];
+            if (str_equal(it.path, active_dir)) {
+                if (win->finder_item_count >= Window::FINDER_MAX_ITEMS) break;
+                
+                fs::VFSNode& node = win->finder_items[win->finder_item_count++];
+                str_copy(node.name, it.name, sizeof(node.name));
+                node.type = it.is_directory ? fs::NodeType::DIRECTORY : fs::NodeType::FILE;
+                node.size = 0;
+                node.capacity = 0;
+                node.data = nullptr;
+                node.read = nullptr;
+                node.write = nullptr;
+                node.finddir = nullptr;
+                node.readdir = nullptr;
+            }
+        }
+    }
+}
+
 void WindowManager::draw_finder_content(Window* win) {
+    if (win->finder_needs_reload) {
+        populate_finder_cache(win);
+    }
+
     int x = win->rect.x;
     int y = win->rect.y;
     int w = win->rect.w;
@@ -695,46 +848,78 @@ void WindowManager::draw_finder_content(Window* win) {
     draw_string("Back", x + 168, toolbar_y + 10, C_TEXT, 13.0f);
 
     // Current Path Bar
-    draw_string("Path: /", x + 225, toolbar_y + 10, C_TEXT_MUTED, 13.0f);
-    draw_string(active_dir, x + 270, toolbar_y + 10, C_TEXT, 13.0f);
+    if (win->finder_editing_path) {
+        int box_x = x + 220;
+        int box_w = w - 490;
+        uint32_t box_border = 0x000F52BA;
+        drivers::Framebuffer::draw_rounded_rect_alpha(box_x, toolbar_y + 5, box_w, 24, 6, box_border, 255);
+        drivers::Framebuffer::draw_rounded_rect_alpha(box_x + 1, toolbar_y + 6, box_w - 2, 22, 5, dark_mode ? 0x000F172A : C_WHITE, 255);
+        
+        char path_edit_str[256];
+        int pe_len = 0;
+        while (win->text_input[pe_len] && pe_len < 250) {
+            path_edit_str[pe_len] = win->text_input[pe_len];
+            pe_len++;
+        }
+        if ((frame_counter / 20) % 2 == 0) {
+            path_edit_str[pe_len++] = '|';
+        }
+        path_edit_str[pe_len] = '\0';
+        draw_string(path_edit_str, box_x + 8, toolbar_y + 10, C_TEXT, 13.0f);
+    } else {
+        draw_string("Path: /", x + 225, toolbar_y + 10, C_TEXT_MUTED, 13.0f);
+        draw_string(active_dir, x + 270, toolbar_y + 10, C_TEXT, 13.0f);
+    }
+
+    // View Toggle button (Grid / List)
+    uint32_t toggle_color = win->finder_list_view_mode ? 0x00D0D0D0 : 0x00E0E0E0;
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + w - 260, toolbar_y + 5, 50, 24, 6, toggle_color, 255);
+    draw_string(win->finder_list_view_mode ? "Grid" : "List", x + w - 248, toolbar_y + 10, C_TEXT, 13.0f);
 
     // + Folder Button
-    drivers::Framebuffer::draw_rounded_rect_alpha(x + w - 180, toolbar_y + 5, 80, 24, 6, 0x00E0E0E0, 255);
-    draw_string("+ Folder", x + w - 168, toolbar_y + 10, C_TEXT, 13.0f);
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + w - 190, toolbar_y + 5, 80, 24, 6, 0x00E0E0E0, 255);
+    draw_string("+ Folder", x + w - 178, toolbar_y + 10, C_TEXT, 13.0f);
 
     // + File Button
-    drivers::Framebuffer::draw_rounded_rect_alpha(x + w - 90, toolbar_y + 5, 80, 24, 6, 0x00E0E0E0, 255);
-    draw_string("+ File", x + w - 74, toolbar_y + 10, C_TEXT, 13.0f);
+    drivers::Framebuffer::draw_rounded_rect_alpha(x + w - 100, toolbar_y + 5, 80, 24, 6, 0x00E0E0E0, 255);
+    draw_string("+ File", x + w - 84, toolbar_y + 10, C_TEXT, 13.0f);
 
     // Sidebar items
     draw_string("Favorites", x + 15, y + TITLE_BAR_HEIGHT + 15, C_TEXT_MUTED, 12.0f);
     
-    const char* favorites[] = {"Desktop", "My Computer", "My Documents"};
-    for (int i = 0; i < 3; i++) {
+    const char* favorites[] = {"Desktop", "Applications", "Documents", "/", "/tar", "/disk"};
+    const char* fav_labels[] = {"Desktop", "Applications", "Documents", "Root (/)    ", "ROM (/tar)  ", "Disk (/disk)"};
+    for (int i = 0; i < 6; i++) {
         int iy = y + TITLE_BAR_HEIGHT + 40 + i * 30;
         bool is_selected = str_equal(active_dir, favorites[i]);
         if (is_selected) {
             drivers::Framebuffer::draw_rounded_rect_alpha(x + 8, iy - 4, 124, 24, 6, C_HOVER, 255);
         }
         uint32_t tc = is_selected ? C_WHITE : C_TEXT;
-        draw_string(favorites[i], x + 18, iy, tc, 14.0f);
+        draw_string(fav_labels[i], x + 18, iy, tc, 14.0f);
     }
     
-    // Draw files in the active directory
-    int grid_col = 0;
-    int grid_row = 0;
-    for (int i = 0; i < desktop_item_count; i++) {
-        DiskItem& it = desktop_items[i];
-        if (str_equal(it.path, active_dir)) {
+    if (!win->finder_list_view_mode) {
+        // Draw files in the active directory (Grid view)
+        int grid_col = 0;
+        int grid_row = 0;
+        int columns = (w - 180) / 90;
+        if (columns < 1) columns = 1;
+
+        for (int i = 0; i < win->finder_item_count; i++) {
+            fs::VFSNode& it = win->finder_items[i];
             int ix = x + 170 + grid_col * 90;
             int iy = y + TITLE_BAR_HEIGHT + 55 + grid_row * 90;
             
+            if (iy + 80 > y + h - 12) break;
+
             bool is_item_selected = (win->selected_item_idx == i);
             if (is_item_selected) {
                 drivers::Framebuffer::draw_rounded_rect_alpha(ix, iy - 5, 64, 80, 8, 0x0080B0F0, 100);
             }
 
-            draw_vector_icon(it.name, ix + 12, iy, 40, it.is_directory, it.is_terminal, is_item_selected);
+            bool is_term = str_equal(it.name, "Terminal") || str_equal(it.name, "Terminal.app");
+            draw_vector_icon(it.name, ix + 12, iy, 40, it.type == fs::NodeType::DIRECTORY, is_term, is_item_selected);
             
             if (is_item_selected && is_renaming_item) {
                 drivers::Framebuffer::draw_rounded_rect_alpha(ix - 10, iy + 42, 84, 20, 4, C_WHITE, 255);
@@ -752,13 +937,102 @@ void WindowManager::draw_finder_content(Window* win) {
             } else {
                 int label_w = get_string_width(it.name, 13.0f);
                 int label_x = ix + (64 - label_w) / 2;
-                draw_string(it.name, label_x, iy + 45, C_TEXT, 13.0f);
+                if (label_w > 80) {
+                    char truncated[16];
+                    int char_count = 0;
+                    while (it.name[char_count] && char_count < 8) {
+                        truncated[char_count] = it.name[char_count];
+                        char_count++;
+                    }
+                    truncated[char_count++] = '.';
+                    truncated[char_count++] = '.';
+                    truncated[char_count++] = '.';
+                    truncated[char_count] = '\0';
+                    label_w = get_string_width(truncated, 13.0f);
+                    label_x = ix + (64 - label_w) / 2;
+                    draw_string(truncated, label_x, iy + 45, C_TEXT, 13.0f);
+                } else {
+                    draw_string(it.name, label_x, iy + 45, C_TEXT, 13.0f);
+                }
             }
             
             grid_col++;
-            if (grid_col >= 3) {
+            if (grid_col >= columns) {
                 grid_col = 0;
                 grid_row++;
+            }
+        }
+    } else {
+        // Draw List Header
+        int list_y = y + TITLE_BAR_HEIGHT + 45;
+        uint32_t header_bg = dark_mode ? 0x002B374A : 0x00EAEAEA;
+        drivers::Framebuffer::draw_rect_alpha(x + 142, list_y, w - 143, 22, header_bg, 255);
+        drivers::Framebuffer::draw_rect_alpha(x + 142, list_y + 21, w - 143, 1, border_c, 255);
+
+        // Header Column Labels
+        draw_string("Name", x + 180, list_y + 4, C_TEXT_MUTED, 12.0f);
+        draw_string("Type", x + 340, list_y + 4, C_TEXT_MUTED, 12.0f);
+        draw_string("Size", x + w - 80, list_y + 4, C_TEXT_MUTED, 12.0f);
+
+        int row_h = 24;
+        for (int i = 0; i < win->finder_item_count; i++) {
+            fs::VFSNode& it = win->finder_items[i];
+            int iy = list_y + 22 + i * row_h;
+            
+            if (iy + row_h > y + h - 12) break;
+
+            bool is_item_selected = (win->selected_item_idx == i);
+            if (is_item_selected) {
+                drivers::Framebuffer::draw_rect_alpha(x + 142, iy, w - 143, row_h, C_HOVER, 255);
+            } else if (i % 2 == 1) {
+                uint32_t zebra_bg = dark_mode ? 0x00222F3E : 0x00FAFAFA;
+                drivers::Framebuffer::draw_rect_alpha(x + 142, iy, w - 143, row_h, zebra_bg, 255);
+            }
+
+            bool is_term = str_equal(it.name, "Terminal") || str_equal(it.name, "Terminal.app");
+            draw_vector_icon(it.name, x + 155, iy + 4, 16, it.type == fs::NodeType::DIRECTORY, is_term, is_item_selected);
+
+            uint32_t tc = is_item_selected ? C_WHITE : C_TEXT;
+            draw_string(it.name, x + 180, iy + 5, tc, 13.0f);
+
+            const char* type_str = "File";
+            if (it.type == fs::NodeType::DIRECTORY) {
+                type_str = "Folder";
+            } else if (ends_with(it.name, ".bmp")) {
+                type_str = "BMP Image";
+            } else if (ends_with(it.name, ".sng")) {
+                type_str = "SNG Sheet";
+            } else if (ends_with(it.name, ".wav")) {
+                type_str = "WAV Audio";
+            } else if (is_term) {
+                type_str = "App";
+            }
+            draw_string(type_str, x + 340, iy + 5, is_item_selected ? C_WHITE : C_TEXT_MUTED, 12.0f);
+
+            if (it.type == fs::NodeType::DIRECTORY) {
+                draw_string("--", x + w - 80, iy + 5, is_item_selected ? C_WHITE : C_TEXT_MUTED, 12.0f);
+            } else {
+                char size_buf[32];
+                if (it.size >= 1024 * 1024) {
+                    int_to_str(it.size / (1024 * 1024), size_buf, 32);
+                    int len = 0;
+                    while (size_buf[len]) len++;
+                    size_buf[len++] = ' '; size_buf[len++] = 'M'; size_buf[len++] = 'B';
+                    size_buf[len] = '\0';
+                } else if (it.size >= 1024) {
+                    int_to_str(it.size / 1024, size_buf, 32);
+                    int len = 0;
+                    while (size_buf[len]) len++;
+                    size_buf[len++] = ' '; size_buf[len++] = 'K'; size_buf[len++] = 'B';
+                    size_buf[len] = '\0';
+                } else {
+                    int_to_str(it.size, size_buf, 32);
+                    int len = 0;
+                    while (size_buf[len]) len++;
+                    size_buf[len++] = ' '; size_buf[len++] = 'B';
+                    size_buf[len] = '\0';
+                }
+                draw_string(size_buf, x + w - 80, iy + 5, is_item_selected ? C_WHITE : C_TEXT_MUTED, 12.0f);
             }
         }
     }
@@ -2678,33 +2952,52 @@ void WindowManager::execute_menu_action(int action_id) {
         int sel = -1;
         if (active_window && active_window->title_is("Finder")) {
             sel = active_window->selected_item_idx;
+            if (sel >= 0 && sel < active_window->finder_item_count) {
+                clipboard_item_idx = sel;
+                clipboard_is_cut = (action_id == 10);
+                get_vfs_path(active_dir, active_window->finder_items[sel].name, clipboard_path);
+            }
         } else {
             for (int j = 0; j < desktop_item_count; j++) {
                 if (desktop_items[j].selected) { sel = j; break; }
             }
-        }
-        if (sel != -1) {
-            clipboard_item_idx = sel;
-            clipboard_is_cut = (action_id == 10);
-            get_vfs_path(desktop_items[sel].path, desktop_items[sel].name, clipboard_path);
+            if (sel != -1) {
+                clipboard_item_idx = sel;
+                clipboard_is_cut = (action_id == 10);
+                get_vfs_path(desktop_items[sel].path, desktop_items[sel].name, clipboard_path);
+            }
         }
     } else if (action_id == 11) { // Rename
         is_renaming_item = true;
-        if (active_window && !active_window->title_is("Finder")) {
+        if (active_window && active_window->title_is("Finder")) {
+            int sel = active_window->selected_item_idx;
+            if (sel >= 0 && sel < active_window->finder_item_count) {
+                str_copy(rename_original_name, active_window->finder_items[sel].name, sizeof(rename_original_name));
+            }
+        } else if (active_window && !active_window->title_is("Finder")) {
             active_window = nullptr;
         }
     } else if (action_id == 12) { // Delete
-        int sel = -1;
         if (active_window && active_window->title_is("Finder")) {
-            sel = active_window->selected_item_idx;
+            int sel = active_window->selected_item_idx;
             active_window->selected_item_idx = -1;
+            if (sel >= 0 && sel < active_window->finder_item_count) {
+                delete_finder_item(active_dir, active_window->finder_items[sel].name, active_window->finder_items[sel].type == fs::NodeType::DIRECTORY);
+                for (Window* w = window_list_head; w; w = w->next) {
+                    if (w->title_is("Finder")) w->finder_needs_reload = true;
+                }
+            }
         } else {
+            int sel = -1;
             for (int j = 0; j < desktop_item_count; j++) {
                 if (desktop_items[j].selected) { sel = j; break; }
             }
-        }
-        if (sel != -1) {
-            delete_desktop_item(sel);
+            if (sel != -1) {
+                delete_desktop_item(sel);
+                for (Window* w = window_list_head; w; w = w->next) {
+                    if (w->title_is("Finder")) w->finder_needs_reload = true;
+                }
+            }
         }
     } else if (action_id == 13) { // Paste
         if (clipboard_path[0] != '\0') {
@@ -2723,7 +3016,6 @@ void WindowManager::execute_menu_action(int action_id) {
                 const char* rel_dest = dest_path;
                 if (dest_path[0] == '/') rel_dest = dest_path + 1;
                 
-                // Remove duplicate in target folder from VFS Node pool
                 for (size_t i = 0; i < fs::VFS::node_count; ++i) {
                     if (str_equal(fs::VFS::child_nodes[i].name, rel_dest)) {
                         if (fs::VFS::child_nodes[i].data) {
@@ -2736,7 +3028,6 @@ void WindowManager::execute_menu_action(int action_id) {
                         break;
                     }
                 }
-                // Remove duplicate from desktop items cached array
                 for (int j = 0; j < desktop_item_count; j++) {
                     if (str_equal(desktop_items[j].path, active_dir) && str_equal(desktop_items[j].name, base_name)) {
                         for (int k = j; k < desktop_item_count - 1; k++) {
@@ -2791,6 +3082,10 @@ void WindowManager::execute_menu_action(int action_id) {
                         }
                     }
                     clipboard_path[0] = '\0';
+                }
+
+                for (Window* w = window_list_head; w; w = w->next) {
+                    if (w->title_is("Finder")) w->finder_needs_reload = true;
                 }
             }
         }
@@ -3606,8 +3901,16 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                 if (last_slash != -1) {
                                     clicked->text_input[last_slash] = '\0';
                                     clicked->text_len = last_slash;
+                                } else {
+                                    clicked->text_input[0] = '\0';
+                                    clicked->text_len = 0;
                                 }
-                            } else if (rx >= clicked->rect.w - 180 && rx < clicked->rect.w - 100) { // + Folder
+                                clicked->selected_item_idx = -1;
+                                clicked->finder_needs_reload = true;
+                            } else if (rx >= clicked->rect.w - 260 && rx < clicked->rect.w - 210) { // Toggle Mode
+                                clicked->finder_list_view_mode = !clicked->finder_list_view_mode;
+                                clicked->finder_needs_reload = true;
+                            } else if (rx >= clicked->rect.w - 190 && rx < clicked->rect.w - 110) { // + Folder
                                 char folder_name[64];
                                 int count = 1;
                                 bool exists = true;
@@ -3623,8 +3926,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                     while (num_buf[p_idx]) { folder_name[n_idx++] = num_buf[p_idx++]; }
                                     folder_name[n_idx] = '\0';
                                     
-                                    for (int i = 0; i < desktop_item_count; i++) {
-                                        if (str_equal(desktop_items[i].path, active_dir) && str_equal(desktop_items[i].name, folder_name)) {
+                                    for (int i = 0; i < clicked->finder_item_count; i++) {
+                                        if (str_equal(clicked->finder_items[i].name, folder_name)) {
                                             exists = true;
                                             break;
                                         }
@@ -3632,7 +3935,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                     count++;
                                 }
                                 add_item(folder_name, true, false, active_dir, 0, 0);
-                            } else if (rx >= clicked->rect.w - 90 && rx < clicked->rect.w - 10) { // + File
+                                clicked->finder_needs_reload = true;
+                            } else if (rx >= clicked->rect.w - 100 && rx < clicked->rect.w - 20) { // + File
                                 char file_name[64];
                                 int count = 1;
                                 bool exists = true;
@@ -3649,8 +3953,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                     file_name[n_idx++] = '.'; file_name[n_idx++] = 't'; file_name[n_idx++] = 'x'; file_name[n_idx++] = 't';
                                     file_name[n_idx] = '\0';
                                     
-                                    for (int i = 0; i < desktop_item_count; i++) {
-                                        if (str_equal(desktop_items[i].path, active_dir) && str_equal(desktop_items[i].name, file_name)) {
+                                    for (int i = 0; i < clicked->finder_item_count; i++) {
+                                        if (str_equal(clicked->finder_items[i].name, file_name)) {
                                             exists = true;
                                             break;
                                         }
@@ -3658,13 +3962,20 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                     count++;
                                 }
                                 add_item(file_name, false, false, active_dir, 0, 0);
+                                clicked->finder_needs_reload = true;
+                            } else if (rx >= 220 && rx < clicked->rect.w - 270) {
+                                clicked->finder_editing_path = true;
+                                clicked->selected_item_idx = -1;
+                            } else {
+                                clicked->finder_editing_path = false;
                             }
                             force_redraw_all();
                         } else if (rx >= 8 && rx < 142) {
-                            for (int i = 0; i < 3; i++) {
+                            clicked->finder_editing_path = false;
+                            for (int i = 0; i < 6; i++) {
                                 int iy = 40 + i * 30;
                                 if (ry >= iy - 4 && ry < iy + 20) {
-                                    const char* favorites[] = {"Desktop", "Applications", "Documents"};
+                                    const char* favorites[] = {"Desktop", "Applications", "Documents", "/", "/tar", "/disk"};
                                     int len = 0;
                                     while (favorites[i][len] && len < 250) {
                                         clicked->text_input[len] = favorites[i][len];
@@ -3672,136 +3983,149 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                     }
                                     clicked->text_input[len] = '\0';
                                     clicked->text_len = len;
+                                    clicked->selected_item_idx = -1;
+                                    clicked->finder_needs_reload = true;
                                     force_redraw_all();
                                     break;
                                 }
                             }
-                        } else if (rx >= 152) {
-                            const char* active_dir = clicked->text_input;
-                            if (clicked->text_len == 0) active_dir = "Desktop";
+                        } else if (rx >= 142) {
+                            clicked->finder_editing_path = false;
+                            int clicked_idx = -1;
                             
-                            int grid_col = 0;
-                            int grid_row = 0;
-                            bool clicked_item = false;
-                            for (int i = 0; i < desktop_item_count; i++) {
-                                DiskItem& it = desktop_items[i];
-                                if (str_equal(it.path, active_dir)) {
+                            if (!clicked->finder_list_view_mode) {
+                                int grid_col = 0;
+                                int grid_row = 0;
+                                int columns = (clicked->rect.w - 180) / 90;
+                                if (columns < 1) columns = 1;
+
+                                for (int i = 0; i < clicked->finder_item_count; i++) {
                                     int ix = 170 + grid_col * 90;
                                     int iy = 55 + grid_row * 90;
                                     if (rx >= ix && rx < ix + 64 && ry >= iy && ry < iy + 80) {
-                                        clicked_item = true;
-                                        
-                                        bool is_double_click = (last_finder_clicked_item_idx == i && (frame_counter - last_finder_click_time) < 30);
-                                        last_finder_click_time = frame_counter;
-                                        last_finder_clicked_item_idx = i;
-                                        
-                                        if (is_double_click) {
-                                            if (it.is_directory) {
-                                                int len = 0;
-                                                while (clicked->text_input[len]) len++;
-                                                if (len > 0) {
-                                                    clicked->text_input[len++] = '/';
-                                                }
-                                                int name_idx = 0;
-                                                while (it.name[name_idx] && len < 250) {
-                                                    clicked->text_input[len++] = it.name[name_idx++];
-                                                }
-                                                clicked->text_input[len] = '\0';
-                                                clicked->text_len = len;
-                                                clicked->selected_item_idx = -1;
-                                            } else {
-                                                char full_path[256];
-                                                int fp_idx = 0;
-                                                if (str_equal(active_dir, "Desktop") || str_equal(active_dir, "Applications") || str_equal(active_dir, "Documents")) {
-                                                    if (str_equal(it.name, "hello.txt")) {
-                                                        const char* hello_p = "/tar/hello.txt";
-                                                        while (hello_p[fp_idx]) { full_path[fp_idx] = hello_p[fp_idx]; fp_idx++; }
-                                                    } else if (str_equal(it.name, "info.txt")) {
-                                                        const char* info_p = "/tar/docs/info.txt";
-                                                        while (info_p[fp_idx]) { full_path[fp_idx] = info_p[fp_idx]; fp_idx++; }
-                                                    } else {
-                                                        const char* prefix = "/";
-                                                        while (prefix[fp_idx]) { full_path[fp_idx] = prefix[fp_idx]; fp_idx++; }
-                                                        int n_idx = 0;
-                                                        while (it.name[n_idx]) { full_path[fp_idx++] = it.name[n_idx++]; }
-                                                    }
-                                                } else {
-                                                    const char* prefix = "/";
-                                                    while (prefix[fp_idx]) { full_path[fp_idx] = prefix[fp_idx]; fp_idx++; }
-                                                    int d_idx = 0;
-                                                    while (active_dir[d_idx]) { full_path[fp_idx++] = active_dir[d_idx++]; }
-                                                    full_path[fp_idx++] = '/';
-                                                    int n_idx = 0;
-                                                    while (it.name[n_idx]) { full_path[fp_idx++] = it.name[n_idx++]; }
-                                                }
-                                                full_path[fp_idx] = '\0';
-                                                
-                                                char edit_title[128] = "Code Editor - ";
-                                                int t_idx = 14;
-                                                int f_len = 0;
-                                                while (full_path[f_len]) {
-                                                    edit_title[t_idx++] = full_path[f_len++];
-                                                }
-                                                edit_title[t_idx] = '\0';
-                                                
-                                                if (it.is_terminal) {
-                                                    create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
-                                                } else if (str_equal(it.name, "System Settings")) {
-                                                    create_window((width - 500)/2, (height - 420)/2, 500, 420, "System Settings", 0x00FFFFFF);
-                                                } else if (ends_with(it.name, ".bmp")) {
-                                                    char pic_title[256] = "Picture Viewer - ";
-                                                    str_copy(pic_title + 17, full_path, 230);
-                                                    create_window((width - 450)/2, (height - 380)/2, 450, 380, pic_title, 0x00FFFFFF);
-                                                } else if (ends_with(it.name, ".sng")) {
-                                                    char audio_title[256] = "Audio Player - ";
-                                                    str_copy(audio_title + 15, full_path, 230);
-                                                    create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
-                                                    load_sng_file(full_path);
-                                                } else if (ends_with(it.name, ".wav")) {
-                                                    char audio_title[256] = "Audio Player - ";
-                                                    str_copy(audio_title + 15, full_path, 230);
-                                                    create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
-                                                    load_wav_file(full_path);
-                                                } else {
-                                                    Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
-                                                    if (code_win) {
-                                                        fs::VFSNode* node = fs::VFS::open(full_path);
-                                                        if (node) {
-                                                            fs::File f;
-                                                            f.node = node;
-                                                            f.offset = 0;
-                                                            ssize_t bytes = fs::VFS::read(&f, code_win->text_input, sizeof(code_win->text_input) - 1);
-                                                            if (bytes > 0) {
-                                                                code_win->text_input[bytes] = '\0';
-                                                                code_win->text_len = bytes;
-                                                            } else {
-                                                                code_win->text_input[0] = '\0';
-                                                                code_win->text_len = 0;
-                                                            }
-                                                        } else {
-                                                            code_win->text_input[0] = '\0';
-                                                            code_win->text_len = 0;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            clicked->selected_item_idx = i;
-                                            is_renaming_item = false;
-                                        }
+                                        clicked_idx = i;
                                         break;
                                     }
                                     grid_col++;
-                                    if (grid_col >= 3) {
+                                    if (grid_col >= columns) {
                                         grid_col = 0;
                                         grid_row++;
+                                    }
+                                }
+                            } else {
+                                int list_y = 45;
+                                int row_h = 24;
+                                for (int i = 0; i < clicked->finder_item_count; i++) {
+                                    int iy = list_y + 22 + i * row_h;
+                                    if (ry >= iy && ry < iy + row_h) {
+                                        clicked_idx = i;
+                                        break;
+                                    }
+                                }
                             }
-                        }
-                    }
-                    if (!clicked_item) {
+
+                            if (clicked_idx != -1) {
+                                fs::VFSNode& it = clicked->finder_items[clicked_idx];
+                                bool is_double_click = (last_finder_clicked_item_idx == clicked_idx && (frame_counter - last_finder_click_time) < 30);
+                                last_finder_click_time = frame_counter;
+                                last_finder_clicked_item_idx = clicked_idx;
+                                
+                                if (is_double_click) {
+                                    if (it.type == fs::NodeType::DIRECTORY) {
+                                        int len = 0;
+                                        while (clicked->text_input[len]) len++;
+                                        if (len > 0 && clicked->text_input[len - 1] != '/') {
+                                            clicked->text_input[len++] = '/';
+                                        }
+                                        int name_idx = 0;
+                                        while (it.name[name_idx] && len < 250) {
+                                            clicked->text_input[len++] = it.name[name_idx++];
+                                        }
+                                        clicked->text_input[len] = '\0';
+                                        clicked->text_len = len;
+                                        clicked->selected_item_idx = -1;
+                                        clicked->finder_needs_reload = true;
+                                    } else {
+                                        char full_path[256];
+                                        int fp_idx = 0;
+                                        const char* active_dir = clicked->text_input;
+                                        if (clicked->text_len == 0) active_dir = "Desktop";
+                                        
+                                        if (active_dir[0] == '/') {
+                                            str_copy(full_path, active_dir, sizeof(full_path));
+                                            int len = 0;
+                                            while (full_path[len]) len++;
+                                            if (len > 0 && full_path[len - 1] != '/') {
+                                                full_path[len++] = '/';
+                                            }
+                                            str_copy(full_path + len, it.name, sizeof(full_path) - len);
+                                        } else {
+                                            if (str_equal(it.name, "hello.txt")) {
+                                                str_copy(full_path, "/tar/hello.txt", sizeof(full_path));
+                                            } else if (str_equal(it.name, "info.txt")) {
+                                                str_copy(full_path, "/tar/docs/info.txt", sizeof(full_path));
+                                            } else {
+                                                full_path[0] = '/';
+                                                str_copy(full_path + 1, it.name, sizeof(full_path) - 1);
+                                            }
+                                        }
+
+                                        char edit_title[128] = "Code Editor - ";
+                                        int t_idx = 14;
+                                        int f_len = 0;
+                                        while (full_path[f_len]) {
+                                            edit_title[t_idx++] = full_path[f_len++];
+                                        }
+                                        edit_title[t_idx] = '\0';
+
+                                        bool is_term = str_equal(it.name, "Terminal") || str_equal(it.name, "Terminal.app");
+                                        if (is_term) {
+                                            create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
+                                        } else if (str_equal(it.name, "System Settings")) {
+                                            create_window((width - 500)/2, (height - 420)/2, 500, 420, "System Settings", 0x00FFFFFF);
+                                        } else if (ends_with(it.name, ".bmp")) {
+                                            char pic_title[256] = "Picture Viewer - ";
+                                            str_copy(pic_title + 17, full_path, 230);
+                                            create_window((width - 450)/2, (height - 380)/2, 450, 380, pic_title, 0x00FFFFFF);
+                                        } else if (ends_with(it.name, ".sng")) {
+                                            char audio_title[256] = "Audio Player - ";
+                                            str_copy(audio_title + 15, full_path, 230);
+                                            create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
+                                            load_sng_file(full_path);
+                                        } else if (ends_with(it.name, ".wav")) {
+                                            char audio_title[256] = "Audio Player - ";
+                                            str_copy(audio_title + 15, full_path, 230);
+                                            create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
+                                            load_wav_file(full_path);
+                                        } else {
+                                            Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
+                                            if (code_win) {
+                                                fs::VFSNode* node = fs::VFS::open(full_path);
+                                                if (node) {
+                                                    fs::File f;
+                                                    f.node = node;
+                                                    f.offset = 0;
+                                                    ssize_t bytes = fs::VFS::read(&f, code_win->text_input, sizeof(code_win->text_input) - 1);
+                                                    if (bytes > 0) {
+                                                        code_win->text_input[bytes] = '\0';
+                                                        code_win->text_len = bytes;
+                                                    } else {
+                                                        code_win->text_input[0] = '\0';
+                                                        code_win->text_len = 0;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    clicked->selected_item_idx = clicked_idx;
+                                    is_renaming_item = false;
+                                }
+                            } else {
                                 clicked->selected_item_idx = -1;
                                 is_renaming_item = false;
                             }
+                            force_redraw_all();
                         }
                     } else if (clicked->title_starts_with("Code Editor")) {
                         if (rx >= 10 && rx < 70 && ry >= 5 && ry < 29) {
@@ -4549,19 +4873,44 @@ void WindowManager::handle_key_press(char c) {
             redraw_dirty_rect(dirty);
         } else if (active_window->title_is("Finder") && is_renaming_item && active_window->selected_item_idx != -1) {
             int sel = active_window->selected_item_idx;
-            DiskItem& it = desktop_items[sel];
-            int len = 0;
-            while (it.name[len]) len++;
-            
+            if (sel >= 0 && sel < active_window->finder_item_count) {
+                fs::VFSNode& it = active_window->finder_items[sel];
+                int len = 0;
+                while (it.name[len]) len++;
+                
+                if (c == '\b') {
+                    if (len > 0) {
+                        it.name[len - 1] = '\0';
+                    }
+                } else if (c == '\n') {
+                    is_renaming_item = false;
+                    const char* active_dir = active_window->text_input;
+                    if (active_window->text_len == 0) active_dir = "Desktop";
+                    rename_item(active_dir, rename_original_name, it.name);
+                    active_window->finder_needs_reload = true;
+                } else if (c >= 32 && c <= 126 && len < 28) {
+                    it.name[len] = c;
+                    it.name[len + 1] = '\0';
+                }
+            }
+            Rect dirty = {
+                active_window->rect.x - 4, active_window->rect.y - 4,
+                active_window->rect.w + 8, active_window->rect.h + 8
+            };
+            redraw_dirty_rect(dirty);
+        } else if (active_window->title_is("Finder") && active_window->finder_editing_path) {
             if (c == '\b') {
-                if (len > 0) {
-                    it.name[len - 1] = '\0';
+                if (active_window->text_len > 0) {
+                    active_window->text_len--;
+                    active_window->text_input[active_window->text_len] = '\0';
                 }
             } else if (c == '\n') {
-                is_renaming_item = false;
-            } else if (c >= 32 && c <= 126 && len < 28) {
-                it.name[len] = c;
-                it.name[len + 1] = '\0';
+                active_window->finder_editing_path = false;
+                active_window->selected_item_idx = -1;
+                active_window->finder_needs_reload = true;
+            } else if (c >= 32 && c <= 126 && active_window->text_len < 250) {
+                active_window->text_input[active_window->text_len++] = c;
+                active_window->text_input[active_window->text_len] = '\0';
             }
             Rect dirty = {
                 active_window->rect.x - 4, active_window->rect.y - 4,

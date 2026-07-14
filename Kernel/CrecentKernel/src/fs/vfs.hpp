@@ -23,6 +23,7 @@ struct VFSNode {
     ssize_t (*read)(VFSNode* node, size_t offset, void* buffer, size_t count);
     ssize_t (*write)(VFSNode* node, size_t offset, const void* buffer, size_t count);
     VFSNode* (*finddir)(VFSNode* node, const char* name);
+    int (*readdir)(VFSNode* node, size_t index, VFSNode* entry_out);
 };
 
 struct File {
