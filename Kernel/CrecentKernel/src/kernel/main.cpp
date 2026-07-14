@@ -471,9 +471,6 @@ void gui_demo_thread(void* arg) {
     bool deferred_mouse_right = false;
     char deferred_key_char = 0;
     bool deferred_key_pending = false;
-    int mouse_remainder_x = 0;
-    int mouse_remainder_y = 0;
-
     while (true) {
         // Poll mouse coordinates (drain the hardware queue completely before handling)
         int accum_dx = deferred_mouse_dx;
@@ -488,88 +485,30 @@ void gui_demo_thread(void* arg) {
         deferred_mouse_dy = 0;
         deferred_mouse_pending = false;
 
-        bool drag_active = wm::WindowManager::is_drag_in_progress();
+        while (drivers::Ps2::poll_mouse(last_dx, last_dy, m_left, m_right)) {
+            accum_dx += last_dx;
+            accum_dy += last_dy;
+            any_left = m_left;
+            any_right = m_right;
+            got_packet = true;
+        }
 
-        if (drag_active) {
-            while (drivers::Ps2::poll_mouse(last_dx, last_dy, m_left, m_right)) {
-                accum_dx += last_dx;
-                accum_dy += last_dy;
-                any_left = m_left;
-                any_right = m_right;
-                got_packet = true;
-            }
+        if (got_packet) {
+            // Apply a constant 2.0x scaling factor for predictable, linear mouse tracking
+            int dx = accum_dx * 2;
+            int dy = accum_dy * 2;
 
-            if (got_packet) {
-                int speed = (accum_dx < 0 ? -accum_dx : accum_dx) + (accum_dy < 0 ? -accum_dy : accum_dy);
-                int scale_num = 12;
-                if (speed > 16) {
-                    scale_num = 24;
-                } else if (speed > 8) {
-                    scale_num = 18;
-                } else if (speed > 4) {
-                    scale_num = 14;
-                }
+            cursor_x += dx;
+            cursor_y -= dy;
 
-                int scaled_dx = accum_dx * scale_num + mouse_remainder_x;
-                int scaled_dy = accum_dy * scale_num + mouse_remainder_y;
-                accum_dx = scaled_dx / 10;
-                accum_dy = scaled_dy / 10;
-                mouse_remainder_x = scaled_dx % 10;
-                mouse_remainder_y = scaled_dy % 10;
+            int width = drivers::Framebuffer::get_width();
+            int height = drivers::Framebuffer::get_height();
+            if (cursor_x < 0) cursor_x = 0;
+            if (cursor_x >= width) cursor_x = width - 1;
+            if (cursor_y < 0) cursor_y = 0;
+            if (cursor_y >= height) cursor_y = height - 1;
 
-                cursor_x += accum_dx;
-                cursor_y -= accum_dy;
-
-                int width = drivers::Framebuffer::get_width();
-                int height = drivers::Framebuffer::get_height();
-                if (cursor_x < 0) cursor_x = 0;
-                if (cursor_x >= width) cursor_x = width - 1;
-                if (cursor_y < 0) cursor_y = 0;
-                if (cursor_y >= height) cursor_y = height - 1;
-
-                wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, any_left, any_right);
-            }
-        } else {
-            // Process each packet individually for ultra-smooth 100Hz hardware cursor tracking,
-            // but only render the final composed frame once to avoid VRAM write saturation!
-            int dx = accum_dx;
-            int dy = accum_dy;
-            bool left = any_left;
-            bool right = any_right;
-            bool first_packet = got_packet;
-
-            while (first_packet || drivers::Ps2::poll_mouse(dx, dy, left, right)) {
-                first_packet = false;
-                
-                int speed = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
-                int scale_num = 12;
-                if (speed > 16) {
-                    scale_num = 24;
-                } else if (speed > 8) {
-                    scale_num = 18;
-                } else if (speed > 4) {
-                    scale_num = 14;
-                }
-
-                int scaled_dx = dx * scale_num + mouse_remainder_x;
-                int scaled_dy = dy * scale_num + mouse_remainder_y;
-                dx = scaled_dx / 10;
-                dy = scaled_dy / 10;
-                mouse_remainder_x = scaled_dx % 10;
-                mouse_remainder_y = scaled_dy % 10;
-
-                cursor_x += dx;
-                cursor_y -= dy;
-
-                int width = drivers::Framebuffer::get_width();
-                int height = drivers::Framebuffer::get_height();
-                if (cursor_x < 0) cursor_x = 0;
-                if (cursor_x >= width) cursor_x = width - 1;
-                if (cursor_y < 0) cursor_y = 0;
-                if (cursor_y >= height) cursor_y = height - 1;
-
-                wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, left, right);
-            }
+            wm::WindowManager::handle_mouse_move(cursor_x, cursor_y, any_left, any_right);
         }
 
         // Poll keyboard characters

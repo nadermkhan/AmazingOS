@@ -964,4 +964,10 @@ void Framebuffer::restore_drawing() {
     is_redirected = false;
 }
 
+uint32_t* Framebuffer::get_active_vram_buffer() {
+    if (!initialized || !virtual_base) return nullptr;
+    uint64_t total_bytes = (uint64_t)height * pitch;
+    return (uint32_t*)((uint64_t)virtual_base + (uint64_t)current_page * total_bytes);
+}
+
 } // namespace drivers

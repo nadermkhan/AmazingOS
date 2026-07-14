@@ -124,6 +124,7 @@ private:
     static void bring_to_front(Window* win);
     static void draw_all_windows();
     static void blit_cursor();
+    static void update_hardware_cursor_fast();
     static void redraw_dirty_rect(const Rect& dirty);
     static void redraw_dirty_list(const DirtyList& list);
 

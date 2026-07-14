@@ -71,6 +71,7 @@ public:
     static bool init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, uint8_t b);
     static uint32_t* get_virtual_base() { return virtual_base; }
     static uint32_t* get_back_buffer() { return back_buffer; }
+    static uint32_t* get_active_vram_buffer();
     static void clear(uint32_t color);
     
     // Core drawing primitives

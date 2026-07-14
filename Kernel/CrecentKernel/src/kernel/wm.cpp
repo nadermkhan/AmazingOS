@@ -1814,6 +1814,92 @@ void WindowManager::blit_cursor() {
     // Deprecated stub kept for header ABI compatibility
 }
 
+void WindowManager::update_hardware_cursor_fast() {
+    if (!drivers::Framebuffer::is_initialized()) return;
+
+    uint32_t* vram = drivers::Framebuffer::get_active_vram_buffer();
+    uint32_t* back = drivers::Framebuffer::get_back_buffer();
+    if (!vram || !back) return;
+
+    int screen_w = (int)drivers::Framebuffer::get_width();
+    int screen_h = (int)drivers::Framebuffer::get_height();
+    uint32_t pitch_words = drivers::Framebuffer::get_pitch_words();
+
+    const uint32_t* cursor_data = (ui_scale >= 1.5f) ? cursor_2x_data : cursor_1x_data;
+    int cursor_size = (ui_scale >= 1.5f) ? cursor_2x_size : cursor_1x_size;
+    int offset = (int)(ui_scale >= 1.5f ? 3 : 1);
+
+    // 1. Erase old cursor by copying from clean back_buffer to active VRAM
+    int old_x = last_mouse_x - offset;
+    int old_y = last_mouse_y - offset;
+    int copy_start_y = old_y;
+    int copy_end_y = old_y + cursor_size;
+    if (copy_start_y < 0) copy_start_y = 0;
+    if (copy_end_y > screen_h) copy_end_y = screen_h;
+
+    int copy_start_x = old_x;
+    int copy_end_x = old_x + cursor_size;
+    if (copy_start_x < 0) copy_start_x = 0;
+    if (copy_end_x > screen_w) copy_end_x = screen_w;
+
+    if (copy_start_x < copy_end_x && copy_start_y < copy_end_y) {
+        uint64_t bytes_per_line = (uint64_t)(copy_end_x - copy_start_x) * sizeof(uint32_t);
+        for (int cy = copy_start_y; cy < copy_end_y; ++cy) {
+            uint64_t line_offset = (uint64_t)cy * pitch_words;
+            memcpy(&vram[line_offset + copy_start_x], &back[line_offset + copy_start_x], bytes_per_line);
+        }
+    }
+
+    // 2. Draw new cursor directly to active VRAM, reading background from back_buffer
+    int new_x = mouse_x - offset;
+    int new_y = mouse_y - offset;
+    int draw_start_y = new_y;
+    int draw_end_y = new_y + cursor_size;
+    if (draw_start_y < 0) draw_start_y = 0;
+    if (draw_end_y > screen_h) draw_end_y = screen_h;
+
+    int draw_start_x = new_x;
+    int draw_end_x = new_x + cursor_size;
+    if (draw_start_x < 0) draw_start_x = 0;
+    if (draw_end_x > screen_w) draw_end_x = screen_w;
+
+    if (draw_start_x < draw_end_x && draw_start_y < draw_end_y) {
+        for (int sy = draw_start_y; sy < draw_end_y; ++sy) {
+            int cy = sy - new_y;
+            uint64_t line_offset = (uint64_t)sy * pitch_words;
+            uint32_t* vram_row = vram + line_offset;
+            const uint32_t* back_row = back + line_offset;
+
+            for (int sx = draw_start_x; sx < draw_end_x; ++sx) {
+                int cx = sx - new_x;
+                uint32_t color = cursor_data[cy * cursor_size + cx];
+                uint8_t alpha = (color >> 24) & 0xFF;
+                if (alpha == 0) continue;
+
+                if (alpha == 255) {
+                    vram_row[sx] = color & 0x00FFFFFF;
+                } else {
+                    // Read background from cached back_buffer (standard RAM) instead of VRAM to avoid PCI bus stalls!
+                    uint32_t bg = back_row[sx];
+                    uint32_t b_r = (bg >> 16) & 0xFF;
+                    uint32_t b_g = (bg >> 8) & 0xFF;
+                    uint32_t b_b = bg & 0xFF;
+
+                    uint32_t r = (color >> 16) & 0xFF;
+                    uint32_t g = (color >> 8) & 0xFF;
+                    uint32_t b = color & 0xFF;
+
+                    uint32_t final_r = (r * alpha + b_r * (255 - alpha)) >> 8;
+                    uint32_t final_g = (g * alpha + b_g * (255 - alpha)) >> 8;
+                    uint32_t final_b = (b * alpha + b_b * (255 - alpha)) >> 8;
+
+                    vram_row[sx] = (final_r << 16) | (final_g << 8) | final_b;
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Desktop / wallpaper
 // ---------------------------------------------------------------------------
@@ -3040,6 +3126,11 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
     // Fix 4: Apply mouse positions immediately before rendering ops to prevent stale coordinates
     mouse_x = new_x;
     mouse_y = new_y;
+
+    bool drag_active = (active_window && (active_window->is_dragging || is_resizing_window));
+    if (!drag_active && position_changed) {
+        update_hardware_cursor_fast();
+    }
 
     bool needs_redraw = false;
     DirtyList dirty;
