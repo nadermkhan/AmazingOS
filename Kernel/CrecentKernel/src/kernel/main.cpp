@@ -440,6 +440,7 @@ void gui_demo_thread(void* arg) {
     // Calibrate TSC cycles per frame (60 FPS = 16.6 ms)
     uint64_t tsc_10ms = calibrate_tsc();
     uint64_t tsc_per_frame = (tsc_10ms * 166) / 100;
+    uint64_t next_frame_draw_tsc = rdtsc();
     
     drivers::Serial::print("[DEMO] TSC Frequency calibrated: ");
     char freq_buf[16];
@@ -474,8 +475,6 @@ void gui_demo_thread(void* arg) {
     int mouse_remainder_y = 0;
 
     while (true) {
-        uint64_t start_time = rdtsc();
-
         // Poll mouse coordinates (drain the hardware queue completely before handling)
         int accum_dx = deferred_mouse_dx;
         int accum_dy = deferred_mouse_dy;
@@ -598,13 +597,18 @@ void gui_demo_thread(void* arg) {
             }
         }
 
-        wm::WindowManager::tick();
-        wm::WindowManager::draw_desktop();
+        // Draw frame if the 60 FPS deadline has passed
+        uint64_t current_tsc = rdtsc();
+        if (current_tsc >= next_frame_draw_tsc) {
+            wm::WindowManager::tick();
+            wm::WindowManager::draw_desktop();
+            next_frame_draw_tsc = current_tsc + tsc_per_frame;
+        }
 
         // Block until the next frame deadline or until mouse/keyboard input is received
-        uint64_t target_tsc = start_time + tsc_per_frame;
-        if (rdtsc() < target_tsc && !deferred_mouse_pending && !deferred_key_pending) {
-            kernel::scheduler_set_gui_wake_tsc(target_tsc);
+        current_tsc = rdtsc();
+        if (current_tsc < next_frame_draw_tsc && !deferred_mouse_pending && !deferred_key_pending) {
+            kernel::scheduler_set_gui_wake_tsc(next_frame_draw_tsc);
             kernel::Thread* current = kernel::scheduler_get_current();
             current->state = kernel::THREAD_BLOCKED;
             kernel::schedule();

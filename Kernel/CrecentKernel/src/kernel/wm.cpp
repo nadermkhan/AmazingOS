@@ -1987,6 +1987,11 @@ void WindowManager::invalidate_window(int id) {
 void WindowManager::draw_menu_bar() {
     int w = (int)drivers::Framebuffer::get_width();
     
+    Rect menu_rect = {0, 0, w, MENU_BAR_HEIGHT};
+    if (!drivers::Framebuffer::get_clip_rect().intersects(menu_rect)) {
+        return;
+    }
+    
     // 1. Translucent background and border
     drivers::Framebuffer::draw_rect_alpha(0, 0, w, MENU_BAR_HEIGHT, C_MENU_BG, 200);
     drivers::Framebuffer::draw_rect_alpha(0, MENU_BAR_HEIGHT - 1, w, 1, C_MENU_LINE, 200);
@@ -2056,6 +2061,11 @@ void WindowManager::draw_dock() {
 
     int dx = (screen_w - DOCK_WIDTH) / 2;
     int dy = screen_h - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+
+    Rect dock_rect = {dx, dy, DOCK_WIDTH, DOCK_HEIGHT};
+    if (!drivers::Framebuffer::get_clip_rect().intersects(dock_rect)) {
+        return;
+    }
 
     // 1. Draw Translucent Dock Container
     drivers::Framebuffer::draw_rounded_rect_alpha(dx, dy, DOCK_WIDTH, DOCK_HEIGHT, 16, C_DOCK_BG, 190);
