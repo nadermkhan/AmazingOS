@@ -72,6 +72,12 @@ bool Framebuffer::initialized = false;
 Rect Framebuffer::clip_rect = {0, 0, 0, 0};
 int Framebuffer::wallpaper_theme_id = 0;
 uint32_t* Framebuffer::wallpaper_cache = nullptr;
+uint32_t* Framebuffer::saved_back_buffer = nullptr;
+uint32_t Framebuffer::saved_width = 0;
+uint32_t Framebuffer::saved_height = 0;
+uint32_t Framebuffer::saved_pitch = 0;
+Rect Framebuffer::saved_clip_rect = {0, 0, 0, 0};
+bool Framebuffer::is_redirected = false;
 
 bool Framebuffer::init(uint64_t phys_addr, uint32_t w, uint32_t h, uint32_t p, uint8_t b) {
     physical_base = phys_addr;
@@ -930,6 +936,32 @@ void Framebuffer::blit_buffer(int x, int y, int w, int h, const uint32_t* src_bu
 
 void Framebuffer::swap_dirty_rect_fast(Rect r) {
     swap_dirty_rect(r);
+}
+
+void Framebuffer::redirect_drawing(uint32_t* temp_buf, uint32_t temp_w, uint32_t temp_h, uint32_t temp_pitch) {
+    if (is_redirected || !temp_buf) return;
+    saved_back_buffer = back_buffer;
+    saved_width = width;
+    saved_height = height;
+    saved_pitch = pitch;
+    saved_clip_rect = clip_rect;
+
+    back_buffer = temp_buf;
+    width = temp_w;
+    height = temp_h;
+    pitch = temp_pitch;
+    clip_rect = {0, 0, (int)temp_w, (int)temp_h};
+    is_redirected = true;
+}
+
+void Framebuffer::restore_drawing() {
+    if (!is_redirected) return;
+    back_buffer = saved_back_buffer;
+    width = saved_width;
+    height = saved_height;
+    pitch = saved_pitch;
+    clip_rect = saved_clip_rect;
+    is_redirected = false;
 }
 
 } // namespace drivers

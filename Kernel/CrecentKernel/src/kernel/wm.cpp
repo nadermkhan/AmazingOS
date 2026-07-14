@@ -1378,6 +1378,11 @@ void Window::draw(bool is_active) {
         return; // Early Discard Optimization
     }
 
+    if (this->is_dragging && this->buffer) {
+        drivers::Framebuffer::blit_buffer(rect.x, rect.y, rect.w, rect.h, this->buffer);
+        return;
+    }
+
     uint8_t alpha = 255;
 
     WindowManager::draw_window_shadow(this->rect, active, alpha);
@@ -1385,14 +1390,14 @@ void Window::draw(bool is_active) {
     bool is_terminal = this->title_is("Terminal");
     WindowManager::draw_window_body(this, alpha, is_terminal);
 
-    // Fast-path: Skip heavy application rendering during active resizing or dragging
+    // Fast-path: Skip heavy application rendering during active resizing
     // This stops vector fonts and HTML loops from starving the system tick timer
-    bool fast_mode = (active && (is_resizing_window || this->is_dragging));
+    bool fast_mode = (active && is_resizing_window);
     
     if (fast_mode) {
         int cx = rect.x + rect.w / 2;
         int cy = rect.y + rect.h / 2;
-        const char* msg = this->is_dragging ? "Moving..." : "Resizing...";
+        const char* msg = "Resizing...";
         WindowManager::draw_string(msg, cx - 40, cy, C_TEXT, 15.0f);
     } else {
         // Only draw client area content if it intersects the active clip rect
@@ -3296,6 +3301,58 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                     }
                     drag_offset_x = new_x - clicked->rect.x;
                     drag_offset_y = new_y - clicked->rect.y;
+
+                    // Allocate and pre-render window content into private buffer for smooth dragging
+                    if (clicked->buffer) {
+                        delete[] clicked->buffer;
+                        clicked->buffer = nullptr;
+                    }
+                    clicked->buffer = new uint32_t[clicked->rect.w * clicked->rect.h];
+                    if (clicked->buffer) {
+                        drivers::Framebuffer::redirect_drawing(clicked->buffer, clicked->rect.w, clicked->rect.h, clicked->rect.w * 4);
+                        
+                        int saved_x = clicked->rect.x;
+                        int saved_y = clicked->rect.y;
+                        clicked->rect.x = 0;
+                        clicked->rect.y = 0;
+
+                        WindowManager::draw_window_body(clicked, 255, clicked->title_is("Terminal"));
+
+                        bool is_terminal = clicked->title_is("Terminal");
+                        if (is_terminal) {
+                            WindowManager::draw_terminal_content(clicked);
+                        } else if (clicked->title_is("Finder")) {
+                            WindowManager::draw_finder_content(clicked);
+                        } else if (clicked->title_is("System Log")) {
+                            WindowManager::draw_system_log_content(clicked);
+                        } else if (clicked->title_is("Performance Monitor")) {
+                            WindowManager::draw_perf_monitor_content(clicked);
+                        } else if (clicked->title_is("About This Mac")) {
+                            WindowManager::draw_about_content(clicked);
+                        } else if (clicked->title_is("Safari")) {
+                            WindowManager::draw_safari_content(clicked);
+                        } else if (clicked->title_is("Mail")) {
+                            WindowManager::draw_mail_content(clicked);
+                        } else if (clicked->title_is("App Store")) {
+                            WindowManager::draw_appstore_content(clicked);
+                        } else if (clicked->title_is("Notes")) {
+                            WindowManager::draw_notes_content(clicked);
+                        } else if (clicked->title_starts_with("Code Editor")) {
+                            WindowManager::draw_code_editor_content(clicked);
+                        } else if (clicked->title_starts_with("Audio Player")) {
+                            WindowManager::draw_audio_player_content(clicked);
+                        } else if (clicked->title_starts_with("Picture Viewer")) {
+                            WindowManager::draw_picture_viewer_content(clicked);
+                        } else if (clicked->title_is("System Settings")) {
+                            WindowManager::draw_settings_content(clicked);
+                        } else {
+                            WindowManager::draw_window_client_area(clicked);
+                        }
+
+                        clicked->rect.x = saved_x;
+                        clicked->rect.y = saved_y;
+                        drivers::Framebuffer::restore_drawing();
+                    }
                     
                     drag_preview_x = clicked->rect.x;
                     drag_preview_y = clicked->rect.y;
@@ -3989,6 +4046,10 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
     if (!state_updated && left_up) {
         if (active_window && active_window->is_dragging) {
             active_window->is_dragging = false;
+            if (active_window->buffer) {
+                delete[] active_window->buffer;
+                active_window->buffer = nullptr;
+            }
             force_redraw_all();
             state_updated = true;
             trigger_host_persist();

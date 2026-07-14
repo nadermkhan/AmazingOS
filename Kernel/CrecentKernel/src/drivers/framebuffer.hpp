@@ -50,10 +50,18 @@ private:
     static Rect clip_rect;
     static int wallpaper_theme_id;
     static uint32_t* wallpaper_cache;
+    static uint32_t* saved_back_buffer;
+    static uint32_t saved_width;
+    static uint32_t saved_height;
+    static uint32_t saved_pitch;
+    static Rect saved_clip_rect;
+    static bool is_redirected;
     static void generate_wallpaper_procedural(uint32_t* dst);
     static void update_wallpaper_cache();
 
 public:
+    static void redirect_drawing(uint32_t* temp_buf, uint32_t temp_w, uint32_t temp_h, uint32_t temp_pitch);
+    static void restore_drawing();
     static bool load_bmp_wallpaper(const char* path);
     static void set_clip_rect(Rect r);
     static void clear_clip_rect();
