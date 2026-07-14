@@ -606,10 +606,10 @@ bool Framebuffer::load_bmp_wallpaper(const char* path) {
     uint32_t bytes_per_pixel = info_hdr.bit_count / 8;
     uint32_t bmp_row_size = (bmp_w * bytes_per_pixel + 3) & ~3;
 
-    // Static stack line buffer to prevent heap fragmentation
-    uint8_t line_buffer[8192];
-    if (bmp_row_size > sizeof(line_buffer)) {
-        drivers::Serial::println("[BMP] Image width exceeds static line buffer capacity.");
+    // Allocate line buffer dynamically on heap to avoid kernel stack overflow
+    uint8_t* line_buffer = (uint8_t*)kernel::kmalloc(bmp_row_size);
+    if (!line_buffer) {
+        drivers::Serial::println("[BMP] Failed to allocate line buffer.");
         return false;
     }
 
@@ -624,6 +624,7 @@ bool Framebuffer::load_bmp_wallpaper(const char* path) {
             file.offset = file_hdr.off_bits + source_y * bmp_row_size;
             
             if (fs::VFS::read(&file, line_buffer, bmp_row_size) != (ssize_t)bmp_row_size) {
+                kernel::kfree(line_buffer);
                 return false;
             }
 
@@ -640,6 +641,7 @@ bool Framebuffer::load_bmp_wallpaper(const char* path) {
                 }
             }
         }
+        kernel::kfree(line_buffer);
         return true;
     }
 
@@ -657,6 +659,7 @@ bool Framebuffer::load_bmp_wallpaper(const char* path) {
         if ((int)source_y != last_loaded_y) {
             file.offset = file_hdr.off_bits + source_y * bmp_row_size;
             if (fs::VFS::read(&file, line_buffer, bmp_row_size) != (ssize_t)bmp_row_size) {
+                kernel::kfree(line_buffer);
                 return false;
             }
             last_loaded_y = source_y;
@@ -679,6 +682,7 @@ bool Framebuffer::load_bmp_wallpaper(const char* path) {
         }
     }
 
+    kernel::kfree(line_buffer);
     return true;
 }
 

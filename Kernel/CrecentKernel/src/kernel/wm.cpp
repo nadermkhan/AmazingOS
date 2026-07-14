@@ -187,7 +187,7 @@ struct DiskItem {
     char name[32];
     bool is_directory;
     bool is_terminal;
-    const char* path; // "Desktop", "Applications", "Documents"
+    char path[64]; // Parent path (e.g. "Desktop", "Applications")
     int x, y; // Icon coordinates
     bool selected;
 };
@@ -293,7 +293,7 @@ static void add_item(const char* name, bool is_dir, bool is_term, const char* pa
     it.name[i] = '\0';
     it.is_directory = is_dir;
     it.is_terminal = is_term;
-    it.path = path;
+    str_copy(it.path, path, 64);
     it.x = x;
     it.y = y;
     it.selected = false;
