@@ -19,6 +19,7 @@
 #include "../drivers/ahci.hpp"
 #include "../fs/partition.hpp"
 #include "../fs/exfat.hpp"
+#include "../drivers/ac97.hpp"
 
 // Polymorphic class to verify C++ new/delete, constructors, and virtual tables
 class TestClass {
@@ -744,6 +745,9 @@ extern "C" __attribute__((sysv_abi)) void kmain(uint32_t magic, uint64_t maddr) 
 
     // Initialize Intel e1000 network driver
     drivers::e1000_init();
+
+    // Initialize AC97 Audio Driver
+    drivers::AC97::init();
 
     // Initialize Graphical Framebuffer if VBE graphics requested and supplied by bootloader
     if (heap_ok) {

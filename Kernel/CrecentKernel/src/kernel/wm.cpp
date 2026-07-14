@@ -6,6 +6,7 @@
 #include "../drivers/framebuffer.hpp"
 #include "../drivers/serial.hpp"
 #include "../drivers/ttf.hpp"
+#include "../drivers/ac97.hpp"
 
 extern "C" void* memcpy(void* dest, const void* src, size_t n);
 
@@ -444,6 +445,17 @@ int WindowManager::audio_note_idx = 0;
 int WindowManager::audio_note_count = 0;
 uint32_t WindowManager::audio_note_end_frame = 0;
 int WindowManager::audio_visualizer_seed = 0;
+
+bool WindowManager::audio_is_wav = false;
+uint8_t* WindowManager::audio_wav_data = nullptr;
+uint32_t WindowManager::audio_wav_size = 0;
+uint32_t WindowManager::audio_wav_offset = 0;
+uint32_t WindowManager::audio_wav_sample_rate = 0;
+uint16_t WindowManager::audio_wav_channels = 0;
+uint16_t WindowManager::audio_wav_bits_per_sample = 0;
+uint32_t WindowManager::audio_amplitude = 0;
+uint32_t WindowManager::audio_wav_phase = 0;
+uint8_t WindowManager::next_buffer_to_fill = 0;
 
 // ---------------------------------------------------------------------------
 // String helpers
@@ -1626,6 +1638,11 @@ void WindowManager::close_window(int id) {
 
     if (curr->title_starts_with("Audio Player")) {
         audio_stop();
+        if (audio_wav_data) {
+            kernel::kfree(audio_wav_data);
+            audio_wav_data = nullptr;
+        }
+        audio_is_wav = false;
     }
 
     if (prev) prev->next = curr->next;
@@ -3367,7 +3384,10 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
 
                         if (ry >= btn_y && ry < btn_y + btn_h) {
                             if (rx >= play_x && rx < play_x + btn_w) {
-                                if (audio_note_count > 0) {
+                                if (audio_is_wav) {
+                                    audio_playing = true;
+                                    drivers::AC97::play(0, 0);
+                                } else if (audio_note_count > 0) {
                                     audio_playing = true;
                                     audio_play_frequency(audio_notes[audio_note_idx].freq);
                                     audio_note_end_frame = frame_counter + audio_notes[audio_note_idx].duration;
@@ -3375,9 +3395,14 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                             } else if (rx >= pause_x && rx < pause_x + btn_w) {
                                 audio_playing = false;
                                 audio_play_frequency(0);
+                                drivers::AC97::stop();
                             } else if (rx >= stop_x && rx < stop_x + btn_w) {
                                 audio_stop();
                                 audio_note_idx = 0;
+                                audio_wav_phase = 0;
+                                fill_wav_buffer_slice(0);
+                                fill_wav_buffer_slice(1);
+                                next_buffer_to_fill = 0;
                             }
                         }
                     } else if (clicked->title_is("Safari")) {
@@ -3574,6 +3599,11 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                                     str_copy(audio_title + 15, full_path, 230);
                                                     create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
                                                     load_sng_file(full_path);
+                                                } else if (ends_with(it.name, ".wav")) {
+                                                    char audio_title[256] = "Audio Player - ";
+                                                    str_copy(audio_title + 15, full_path, 230);
+                                                    create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
+                                                    load_wav_file(full_path);
                                                 } else {
                                                     Window* code_win = create_window((width - 650)/2, (height - 450)/2, 650, 450, edit_title, 0x001E1E1E);
                                                     if (code_win) {
@@ -3808,6 +3838,11 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                             str_copy(audio_title + 15, full_path, 230);
                                             create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
                                             load_sng_file(full_path);
+                                        } else if (ends_with(it.name, ".wav")) {
+                                            char audio_title[256] = "Audio Player - ";
+                                            str_copy(audio_title + 15, full_path, 230);
+                                            create_window((width - 400)/2, (height - 300)/2, 400, 300, audio_title, 0x00FFFFFF);
+                                            load_wav_file(full_path);
                                         } else {
                                             char edit_title[128] = "Code Editor - /";
                                             int t_idx = 15;
@@ -4706,6 +4741,209 @@ void WindowManager::load_sng_file(const char* path) {
     }
 }
 
+void WindowManager::fill_wav_buffer_slice(int buffer_idx) {
+    if (!audio_is_wav || !audio_wav_data) return;
+    
+    static int16_t temp_buf[16384];
+    
+    // Clear temp buffer
+    for (int i = 0; i < 16384; ++i) temp_buf[i] = 0;
+    
+    int src_bytes_per_sample = audio_wav_bits_per_sample / 8;
+    int src_frame_size = audio_wav_channels * src_bytes_per_sample;
+    uint32_t total_src_frames = audio_wav_size / src_frame_size;
+    
+    uint32_t step = (audio_wav_sample_rate << 16) / 48000;
+    if (step == 0) step = 1;
+    
+    uint64_t total_amp = 0;
+    bool finished = false;
+    
+    for (int i = 0; i < 8192; ++i) {
+        uint32_t src_frame_idx = audio_wav_phase >> 16;
+        uint16_t frac = (uint16_t)(audio_wav_phase & 0xFFFF);
+        
+        if (src_frame_idx >= total_src_frames) {
+            finished = true;
+            break;
+        }
+        
+        uint32_t next_frame_idx = src_frame_idx + 1;
+        if (next_frame_idx >= total_src_frames) next_frame_idx = total_src_frames - 1;
+        
+        int16_t raw_l = 0, raw_r = 0;
+        int16_t next_l = 0, next_r = 0;
+        
+        uint8_t* base_ptr = audio_wav_data + audio_wav_offset;
+        
+        if (audio_wav_bits_per_sample == 16) {
+            raw_l = *(int16_t*)(base_ptr + src_frame_idx * src_frame_size);
+            if (audio_wav_channels == 2) {
+                raw_r = *(int16_t*)(base_ptr + src_frame_idx * src_frame_size + 2);
+            } else {
+                raw_r = raw_l;
+            }
+            
+            next_l = *(int16_t*)(base_ptr + next_frame_idx * src_frame_size);
+            if (audio_wav_channels == 2) {
+                next_r = *(int16_t*)(base_ptr + next_frame_idx * src_frame_size + 2);
+            } else {
+                next_r = next_l;
+            }
+        } else { // 8-bit unsigned
+            uint8_t u_l = base_ptr[src_frame_idx * src_frame_size];
+            raw_l = (int16_t)(((int32_t)u_l - 128) << 8);
+            if (audio_wav_channels == 2) {
+                uint8_t u_r = base_ptr[src_frame_idx * src_frame_size + 1];
+                raw_r = (int16_t)(((int32_t)u_r - 128) << 8);
+            } else {
+                raw_r = raw_l;
+            }
+            
+            uint8_t nu_l = base_ptr[next_frame_idx * src_frame_size];
+            next_l = (int16_t)(((int32_t)nu_l - 128) << 8);
+            if (audio_wav_channels == 2) {
+                uint8_t nu_r = base_ptr[next_frame_idx * src_frame_size + 1];
+                next_r = (int16_t)(((int32_t)nu_r - 128) << 8);
+            } else {
+                next_r = next_l;
+            }
+        }
+        
+        // Linear interpolation
+        int32_t sample_l = ((int32_t)raw_l * (65536 - frac) + (int32_t)next_l * frac) >> 16;
+        int32_t sample_r = ((int32_t)raw_r * (65536 - frac) + (int32_t)next_r * frac) >> 16;
+        
+        temp_buf[2 * i] = (int16_t)sample_l;
+        temp_buf[2 * i + 1] = (int16_t)sample_r;
+        
+        int32_t abs_l = sample_l >= 0 ? sample_l : -sample_l;
+        int32_t abs_r = sample_r >= 0 ? sample_r : -sample_r;
+        total_amp += (abs_l + abs_r);
+        
+        audio_wav_phase += step;
+    }
+    
+    drivers::AC97::write_buffer(buffer_idx, temp_buf, 16384);
+    
+    if (finished) {
+        audio_stop();
+    } else {
+        audio_amplitude = (uint32_t)(total_amp / 16384);
+    }
+}
+
+void WindowManager::load_wav_file(const char* path) {
+    audio_stop();
+    audio_is_wav = true;
+    audio_wav_offset = 0;
+    audio_wav_size = 0;
+    audio_amplitude = 0;
+    audio_wav_phase = 0;
+    next_buffer_to_fill = 0;
+    
+    // Extract base name for song details
+    int last_s = -1;
+    for (int i = 0; path[i] != '\0'; i++) {
+        if (path[i] == '/') last_s = i;
+    }
+    const char* base = (last_s != -1) ? path + last_s + 1 : path;
+    str_copy(audio_current_song, base, sizeof(audio_current_song));
+    
+    fs::VFSNode* node = fs::VFS::open(path);
+    if (!node) return;
+    
+    size_t file_size = node->size;
+    if (file_size < 44) return;
+    
+    if (audio_wav_data) {
+        kernel::kfree(audio_wav_data);
+        audio_wav_data = nullptr;
+    }
+    
+    audio_wav_data = (uint8_t*)kernel::kmalloc(file_size);
+    if (!audio_wav_data) return;
+    
+    fs::File f;
+    f.node = node;
+    f.offset = 0;
+    ssize_t read_bytes = fs::VFS::read(&f, audio_wav_data, file_size);
+    if (read_bytes < 44) {
+        kernel::kfree(audio_wav_data);
+        audio_wav_data = nullptr;
+        return;
+    }
+    
+    // Check "RIFF" and "WAVE"
+    if (audio_wav_data[0] != 'R' || audio_wav_data[1] != 'I' || audio_wav_data[2] != 'F' || audio_wav_data[3] != 'F' ||
+        audio_wav_data[8] != 'W' || audio_wav_data[9] != 'A' || audio_wav_data[10] != 'V' || audio_wav_data[11] != 'E') {
+        kernel::kfree(audio_wav_data);
+        audio_wav_data = nullptr;
+        return;
+    }
+    
+    // Find "fmt " chunk
+    uint32_t fmt_offset = 12;
+    bool found_fmt = false;
+    while (fmt_offset + 8 < file_size) {
+        if (audio_wav_data[fmt_offset] == 'f' && audio_wav_data[fmt_offset+1] == 'm' &&
+            audio_wav_data[fmt_offset+2] == 't' && audio_wav_data[fmt_offset+3] == ' ') {
+            found_fmt = true;
+            break;
+        }
+        uint32_t chunk_len = *(uint32_t*)&audio_wav_data[fmt_offset + 4];
+        fmt_offset += 8 + chunk_len;
+    }
+    
+    if (!found_fmt) {
+        kernel::kfree(audio_wav_data);
+        audio_wav_data = nullptr;
+        return;
+    }
+    
+    uint16_t audio_format = *(uint16_t*)&audio_wav_data[fmt_offset + 8];
+    if (audio_format != 1) { // Not PCM
+        kernel::kfree(audio_wav_data);
+        audio_wav_data = nullptr;
+        return;
+    }
+    
+    audio_wav_channels = *(uint16_t*)&audio_wav_data[fmt_offset + 10];
+    audio_wav_sample_rate = *(uint32_t*)&audio_wav_data[fmt_offset + 12];
+    audio_wav_bits_per_sample = *(uint16_t*)&audio_wav_data[fmt_offset + 22];
+    
+    // Find "data" chunk
+    uint32_t data_offset = 12;
+    bool found_data = false;
+    while (data_offset + 8 < file_size) {
+        if (audio_wav_data[data_offset] == 'd' && audio_wav_data[data_offset+1] == 'a' &&
+            audio_wav_data[data_offset+2] == 't' && audio_wav_data[data_offset+3] == 'a') {
+            found_data = true;
+            break;
+        }
+        uint32_t chunk_len = *(uint32_t*)&audio_wav_data[data_offset + 4];
+        data_offset += 8 + chunk_len;
+    }
+    
+    if (!found_data) {
+        kernel::kfree(audio_wav_data);
+        audio_wav_data = nullptr;
+        return;
+    }
+    
+    audio_wav_size = *(uint32_t*)&audio_wav_data[data_offset + 4];
+    audio_wav_offset = data_offset + 8;
+    
+    if (audio_wav_offset + audio_wav_size > file_size) {
+        audio_wav_size = file_size - audio_wav_offset;
+    }
+    
+    // Initial fill of circular buffers
+    fill_wav_buffer_slice(0);
+    fill_wav_buffer_slice(1);
+    next_buffer_to_fill = 0;
+}
+
 void WindowManager::draw_audio_player_content(Window* win) {
     int x = win->rect.x;
     int y = win->rect.y;
@@ -4727,13 +4965,55 @@ void WindowManager::draw_audio_player_content(Window* win) {
     } else {
         str_copy(track_msg + 7, "None Loaded", 100);
     }
-    draw_string(track_msg, x + 30, y + TITLE_BAR_HEIGHT + 55, text_color, 14.0f);
+    draw_string(track_msg, x + 30, y + TITLE_BAR_HEIGHT + 48, text_color, 14.0f);
+
+    char info_msg[128] = "";
+    if (audio_is_wav && audio_wav_data) {
+        char srate_str[16];
+        char bits_str[16];
+        int_to_str(audio_wav_sample_rate, srate_str, sizeof(srate_str));
+        int_to_str(audio_wav_bits_per_sample, bits_str, sizeof(bits_str));
+        
+        str_copy(info_msg, "Format: WAV PCM, ", sizeof(info_msg));
+        str_copy(info_msg + 17, srate_str, 10);
+        int len_cur = 17 + str_len(srate_str);
+        str_copy(info_msg + len_cur, " Hz, ", 10);
+        len_cur += 5;
+        if (audio_wav_channels == 2) {
+            str_copy(info_msg + len_cur, "Stereo, ", 10);
+            len_cur += 8;
+        } else {
+            str_copy(info_msg + len_cur, "Mono, ", 10);
+            len_cur += 6;
+        }
+        str_copy(info_msg + len_cur, bits_str, 10);
+        len_cur += str_len(bits_str);
+        str_copy(info_msg + len_cur, "-bit", 10);
+    } else if (audio_note_count > 0) {
+        str_copy(info_msg, "Format: SNG (PC Speaker Pitch Sheet)", sizeof(info_msg));
+    }
+    
+    if (info_msg[0] != '\0') {
+        draw_string(info_msg, x + 30, y + TITLE_BAR_HEIGHT + 68, C_TEXT_MUTED, 11.0f);
+    }
 
     // Draw progress bar
-    int bar_y = y + TITLE_BAR_HEIGHT + 85;
+    int bar_y = y + TITLE_BAR_HEIGHT + 90;
     int bar_w = w - 60;
     drivers::Framebuffer::draw_rounded_rect_alpha(x + 30, bar_y, bar_w, 8, 4, 0x00CBD5E1, 255);
-    if (audio_note_count > 0) {
+    if (audio_is_wav) {
+        if (audio_wav_size > 0) {
+            int src_bytes_per_sample = audio_wav_bits_per_sample / 8;
+            int src_frame_size = audio_wav_channels * src_bytes_per_sample;
+            uint32_t current_src_frame = audio_wav_phase >> 16;
+            uint32_t total_src_frames = audio_wav_size / src_frame_size;
+            if (total_src_frames > 0) {
+                int progress_w = (current_src_frame * bar_w) / total_src_frames;
+                if (progress_w > bar_w) progress_w = bar_w;
+                drivers::Framebuffer::draw_rounded_rect_alpha(x + 30, bar_y, progress_w, 8, 4, 0x000F52BA, 255);
+            }
+        }
+    } else if (audio_note_count > 0) {
         int progress_w = (audio_note_idx * bar_w) / audio_note_count;
         if (progress_w > bar_w) progress_w = bar_w;
         drivers::Framebuffer::draw_rounded_rect_alpha(x + 30, bar_y, progress_w, 8, 4, 0x000F52BA, 255);
@@ -4770,9 +5050,14 @@ void WindowManager::draw_audio_player_content(Window* win) {
     for (int i = 0; i < bars_count; ++i) {
         int bar_h = 6;
         if (audio_playing) {
-            // Animate using frame counter with zero floating point overhead
-            int anim = (frame_counter * (i + 1) * 3) % 45;
-            bar_h = 6 + anim;
+            if (audio_is_wav) {
+                int anim = (audio_amplitude * (i + 3)) / 2500;
+                if (anim > 50) anim = 50;
+                bar_h = 6 + anim;
+            } else {
+                int anim = (frame_counter * (i + 1) * 3) % 45;
+                bar_h = 6 + anim;
+            }
         }
         int bx = start_eq_x + i * (bar_width + bar_spacing);
         int by = eq_y + 50 - bar_h;

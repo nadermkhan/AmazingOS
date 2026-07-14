@@ -9,7 +9,7 @@ def main():
     subprocess.run(["make"], shell=True)
     
     # 2. Run QEMU with serial redirected to stdio
-    cmd = ["qemu-system-x86_64", "-kernel", "kernel.bin", "-initrd", "test.tar", "-serial", "stdio"]
+    cmd = ["qemu-system-x86_64", "-kernel", "kernel.bin", "-initrd", "test.tar", "-serial", "stdio", "-device", "ac97"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     
     in_persist = False
@@ -47,11 +47,11 @@ def process_persist(lines):
         if line.startswith("SCALE ") or line.startswith("THEME ") or line.startswith("WALLPAPER ") or line.startswith("ITEM "):
             cfg_lines.append(line)
         elif line.startswith("FILE "):
-            parts = line.split(" ")
-            if len(parts) >= 4:
-                filename = parts[1]
-                size = int(parts[2])
-                hex_data = parts[3]
+            parts = line.rsplit(" ", 2)
+            if len(parts) >= 3:
+                filename = parts[0][5:]
+                size = int(parts[1])
+                hex_data = parts[2]
                 
                 # Convert hex to binary data
                 try:

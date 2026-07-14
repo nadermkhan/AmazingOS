@@ -111,6 +111,7 @@ private:
     static void draw_audio_player_content(Window* win);
     static void draw_picture_viewer_content(Window* win);
     static void load_sng_file(const char* path);
+    static void load_wav_file(const char* path);
     static void audio_play_frequency(uint32_t freq);
     static void audio_stop();
     static void audio_tick();
@@ -139,6 +140,18 @@ private:
     static int audio_note_count;
     static uint32_t audio_note_end_frame;
     static int audio_visualizer_seed;
+
+    static bool audio_is_wav;
+    static uint8_t* audio_wav_data;
+    static uint32_t audio_wav_size;
+    static uint32_t audio_wav_offset;
+    static uint32_t audio_wav_sample_rate;
+    static uint16_t audio_wav_channels;
+    static uint16_t audio_wav_bits_per_sample;
+    static uint32_t audio_amplitude;
+    static uint32_t audio_wav_phase;
+    static uint8_t next_buffer_to_fill;
+    static void fill_wav_buffer_slice(int buffer_idx);
 
     static int perf_cpu_history[20];
     static int perf_current_cpu;
