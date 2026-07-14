@@ -1876,13 +1876,42 @@ void WindowManager::init() {
 }
 
 Window* WindowManager::create_window(int x, int y, int w, int h, const char* title, uint32_t color) {
+    int width = (int)drivers::Framebuffer::get_width();
+    int height = (int)drivers::Framebuffer::get_height();
+
+    int physical_w = (int)(w * ui_scale);
+    int physical_h = (int)(h * ui_scale);
+    int physical_x = x;
+    int physical_y = y;
+
+    if (x == (width - w) / 2) {
+        physical_x = (width - physical_w) / 2;
+    } else {
+        physical_x = (int)(x * ui_scale);
+    }
+
+    int target_wy_dock = MENU_BAR_HEIGHT + (height - MENU_BAR_HEIGHT - TASKBAR_HEIGHT - h) / 2;
+    if (y == (height - h) / 2) {
+        physical_y = (height - physical_h) / 2;
+    } else if (y == target_wy_dock) {
+        physical_y = MENU_BAR_HEIGHT + (height - MENU_BAR_HEIGHT - TASKBAR_HEIGHT - physical_h) / 2;
+    } else {
+        physical_y = (int)(y * ui_scale);
+    }
+    if (physical_y < MENU_BAR_HEIGHT) physical_y = MENU_BAR_HEIGHT + 10;
+
     // Fix 17: Handle OOM gracefully without exceptions (freestanding compatible)
-    Window* win = new Window(next_window_id++, x, y, w, h, title, color);
+    Window* win = new Window(next_window_id++, physical_x, physical_y, physical_w, physical_h, title, color);
     if (!win) {
         drivers::Serial::println("[WM ERROR] Failed to allocate window");
         next_window_id--;
         return nullptr;
     }
+
+    win->orig_rect.x = (int)(physical_x / ui_scale);
+    win->orig_rect.y = (int)(physical_y / ui_scale);
+    win->orig_rect.w = w;
+    win->orig_rect.h = h;
 
     if (!window_list_head) {
         window_list_head = win;
@@ -4544,6 +4573,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
     if (!state_updated && left_up) {
         if (active_window && active_window->is_dragging) {
             active_window->is_dragging = false;
+            active_window->orig_rect.x = (int)(active_window->rect.x / ui_scale);
+            active_window->orig_rect.y = (int)(active_window->rect.y / ui_scale);
             if (active_window->buffer) {
                 delete[] active_window->buffer;
                 active_window->buffer = nullptr;
@@ -4554,6 +4585,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
         }
         if (active_window && is_resizing_window) {
             is_resizing_window = false;
+            active_window->orig_rect.w = (int)(active_window->rect.w / ui_scale);
+            active_window->orig_rect.h = (int)(active_window->rect.h / ui_scale);
             force_redraw_all();
             state_updated = true;
             trigger_host_persist();
