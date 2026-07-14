@@ -440,7 +440,7 @@ SubMenu WindowManager::active_submenu = {false, 0, 0, 0, 0, -1, -1};
 int WindowManager::perf_cpu_history[20] = {0};
 int WindowManager::perf_current_cpu = 12;
 int WindowManager::frame_counter = 0;
-float WindowManager::ui_scale = 1.0f;
+float WindowManager::ui_scale = 1.25f;
 bool WindowManager::dark_mode = false;
 int WindowManager::wallpaper_theme_id = 0;
 int WindowManager::current_theme = 0;
@@ -2910,6 +2910,21 @@ void WindowManager::execute_menu_action(int action_id) {
             }
         }
         add_item(folder_name, true, false, active_dir, 30, next_y);
+        for (Window* w = window_list_head; w; w = w->next) {
+            if (w->title_is("Finder")) w->finder_needs_reload = true;
+        }
+        if (active_window && active_window->title_is("Finder")) {
+            populate_finder_cache(active_window);
+            for (int i = 0; i < active_window->finder_item_count; i++) {
+                if (str_equal(active_window->finder_items[i].name, folder_name)) {
+                    active_window->selected_item_idx = i;
+                    is_renaming_item = true;
+                    str_copy(rename_original_name, folder_name, sizeof(rename_original_name));
+                    break;
+                }
+            }
+        }
+        force_redraw_all();
     } else if (action_id == 6) { // New Text File
         char file_name[64];
         int count = 1;
@@ -2944,6 +2959,21 @@ void WindowManager::execute_menu_action(int action_id) {
             }
         }
         add_item(file_name, false, false, active_dir, 30, next_y);
+        for (Window* w = window_list_head; w; w = w->next) {
+            if (w->title_is("Finder")) w->finder_needs_reload = true;
+        }
+        if (active_window && active_window->title_is("Finder")) {
+            populate_finder_cache(active_window);
+            for (int i = 0; i < active_window->finder_item_count; i++) {
+                if (str_equal(active_window->finder_items[i].name, file_name)) {
+                    active_window->selected_item_idx = i;
+                    is_renaming_item = true;
+                    str_copy(rename_original_name, file_name, sizeof(rename_original_name));
+                    break;
+                }
+            }
+        }
+        force_redraw_all();
     } else if (action_id == 7) { // Open Terminal
         create_window((width - 500)/2, (height - 350)/2, 500, 350, "Terminal", C_TERMINAL);
     } else if (action_id == 8) { // Clean Up
@@ -3929,7 +3959,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                             } else if (rx >= clicked->rect.w - 260 && rx < clicked->rect.w - 210) { // Toggle Mode
                                 clicked->finder_list_view_mode = !clicked->finder_list_view_mode;
                                 clicked->finder_needs_reload = true;
-                            } else if (rx >= clicked->rect.w - 190 && rx < clicked->rect.w - 110) { // + Folder
+                             } else if (rx >= clicked->rect.w - 190 && rx < clicked->rect.w - 110) { // + Folder
                                 char folder_name[64];
                                 int count = 1;
                                 bool exists = true;
@@ -3954,7 +3984,19 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                     count++;
                                 }
                                 add_item(folder_name, true, false, active_dir, 0, 0);
-                                clicked->finder_needs_reload = true;
+                                for (Window* w = window_list_head; w; w = w->next) {
+                                    if (w->title_is("Finder")) w->finder_needs_reload = true;
+                                }
+                                populate_finder_cache(clicked);
+                                for (int i = 0; i < clicked->finder_item_count; i++) {
+                                    if (str_equal(clicked->finder_items[i].name, folder_name)) {
+                                        clicked->selected_item_idx = i;
+                                        is_renaming_item = true;
+                                        str_copy(rename_original_name, folder_name, sizeof(rename_original_name));
+                                        break;
+                                    }
+                                }
+                                force_redraw_all();
                             } else if (rx >= clicked->rect.w - 100 && rx < clicked->rect.w - 20) { // + File
                                 char file_name[64];
                                 int count = 1;
@@ -3981,7 +4023,19 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                     count++;
                                 }
                                 add_item(file_name, false, false, active_dir, 0, 0);
-                                clicked->finder_needs_reload = true;
+                                for (Window* w = window_list_head; w; w = w->next) {
+                                    if (w->title_is("Finder")) w->finder_needs_reload = true;
+                                }
+                                populate_finder_cache(clicked);
+                                for (int i = 0; i < clicked->finder_item_count; i++) {
+                                    if (str_equal(clicked->finder_items[i].name, file_name)) {
+                                        clicked->selected_item_idx = i;
+                                        is_renaming_item = true;
+                                        str_copy(rename_original_name, file_name, sizeof(rename_original_name));
+                                        break;
+                                    }
+                                }
+                                force_redraw_all();
                             } else if (rx >= 220 && rx < clicked->rect.w - 270) {
                                 clicked->finder_editing_path = true;
                                 clicked->selected_item_idx = -1;
