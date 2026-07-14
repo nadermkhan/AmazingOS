@@ -3441,32 +3441,42 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
         if (clicked && clicked->title_is("Finder")) {
             int rx = new_x - (clicked->rect.x + 1);
             int ry = new_y - (clicked->rect.y + TITLE_BAR_HEIGHT);
-            if (rx >= 152 && ry >= 35) {
-                const char* active_dir = clicked->text_input;
-                if (clicked->text_len == 0) active_dir = "Desktop";
+            if (rx >= 142 && ry >= 35) {
+                int clicked_idx = -1;
                 
-                int clicked_item_idx = -1;
-                int grid_col = 0;
-                int grid_row = 0;
-                for (int i = 0; i < desktop_item_count; i++) {
-                    DiskItem& it = desktop_items[i];
-                    if (str_equal(it.path, active_dir)) {
+                if (!clicked->finder_list_view_mode) {
+                    int grid_col = 0;
+                    int grid_row = 0;
+                    int columns = (clicked->rect.w - 180) / 90;
+                    if (columns < 1) columns = 1;
+
+                    for (int i = 0; i < clicked->finder_item_count; i++) {
                         int ix = 170 + grid_col * 90;
                         int iy = 55 + grid_row * 90;
                         if (rx >= ix && rx < ix + 64 && ry >= iy && ry < iy + 80) {
-                            clicked_item_idx = i;
+                            clicked_idx = i;
                             break;
                         }
                         grid_col++;
-                        if (grid_col >= 3) {
+                        if (grid_col >= columns) {
                             grid_col = 0;
                             grid_row++;
                         }
                     }
+                } else {
+                    int list_y = 45;
+                    int row_h = 24;
+                    for (int i = 0; i < clicked->finder_item_count; i++) {
+                        int iy = list_y + 22 + i * row_h;
+                        if (ry >= iy && ry < iy + row_h) {
+                            clicked_idx = i;
+                            break;
+                        }
+                    }
                 }
                 
-                if (clicked_item_idx != -1) {
-                    clicked->selected_item_idx = clicked_item_idx;
+                if (clicked_idx != -1) {
+                    clicked->selected_item_idx = clicked_idx;
                     is_renaming_item = false;
                     active_menu.active = true;
                     active_menu.x = new_x;
@@ -3482,10 +3492,19 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                     active_menu.x = new_x;
                     active_menu.y = new_y;
                     active_menu.w = MENU_WIDTH;
-                    active_menu.h = 3 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING;
+                    active_menu.h = 2 * MENU_ITEM_HEIGHT + 2 * MENU_PADDING; // Paste, New
                     active_menu.type = 10; // Finder Empty Context Menu
                     active_menu.hovered_item = -1;
                 }
+
+                // Containment within screen boundaries
+                if (active_menu.x + active_menu.w > width) {
+                    active_menu.x = width - active_menu.w - 4;
+                }
+                if (active_menu.y + active_menu.h > height) {
+                    active_menu.y = height - active_menu.h - 4;
+                }
+
                 force_redraw_all();
                 state_updated = true;
             }
