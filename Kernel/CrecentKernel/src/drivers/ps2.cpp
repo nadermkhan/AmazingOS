@@ -94,15 +94,15 @@ static const char kbd_us[128] = {
   0,    /* Num lock */
   0,    /* Scroll Lock */
   0,    /* Home */
-  0,    /* Up */
+  (char)0x82, /* Up */
   0,    /* Page Up */
   '-',
-  0,    /* Left */
+  (char)0x80, /* Left */
   0,
-  0,    /* Right */
+  (char)0x81, /* Right */
   '+',
   0,    /* End */
-  0,    /* Down */
+  (char)0x83, /* Down */
   0,    /* Page Down */
   0,    /* Insert */
   0,    /* Delete */
@@ -133,15 +133,15 @@ static const char kbd_us_shift[128] = {
   0,    /* Num lock */
   0,    /* Scroll Lock */
   0,    /* Home */
-  0,    /* Up */
+  (char)0x82, /* Up */
   0,    /* Page Up */
   '-',
-  0,    /* Left */
+  (char)0x80, /* Left */
   0,
-  0,    /* Right */
+  (char)0x81, /* Right */
   '+',
   0,    /* End */
-  0,    /* Down */
+  (char)0x83, /* Down */
   0,    /* Page Down */
   0,    /* Insert */
   0,    /* Delete */

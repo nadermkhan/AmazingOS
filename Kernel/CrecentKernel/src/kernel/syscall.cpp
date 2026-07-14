@@ -540,8 +540,8 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
                 break;
             }
 
-            int client_w = win->rect.w - 2;
-            int client_h = win->rect.h - 42;
+            int client_w = win->orig_rect.w - 2;
+            int client_h = win->orig_rect.h - 42;
             size_t size_bytes = client_w * client_h * 4;
 
             if (!syscall_validate_buffer(user_buf, size_bytes)) {
@@ -695,8 +695,8 @@ extern "C" __attribute__((sysv_abi)) void syscall_dispatcher(SyscallFrame* frame
                 break;
             }
 
-            int client_w = win->rect.w - 2;
-            int client_h = win->rect.h - 42;
+            int client_w = win->orig_rect.w - 2;
+            int client_h = win->orig_rect.h - 42;
 
             drivers::TtfRenderer::draw_string_target(win->buffer, client_w, client_h, user_str, x, y, color, (float)size);
             wm::WindowManager::invalidate_window(win_id);

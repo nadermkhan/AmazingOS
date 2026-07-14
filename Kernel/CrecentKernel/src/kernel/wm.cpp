@@ -82,7 +82,18 @@ static int clipboard_item_idx = -1;
 static bool clipboard_is_cut = false;
 static char clipboard_path[256] = "";
 static bool is_renaming_item = false;
+static int rename_cursor_idx = 0;
 static char rename_original_name[128] = "";
+
+static void str_copy(char* dest, const char* src, size_t max_len);
+
+static void start_renaming(const char* name) {
+    is_renaming_item = true;
+    str_copy(rename_original_name, name, sizeof(rename_original_name));
+    int len = 0;
+    while (name[len]) len++;
+    rename_cursor_idx = len;
+}
 
 static uint32_t last_finder_click_time = 0;
 static int last_finder_clicked_item_idx = -1;
@@ -158,6 +169,8 @@ Window::Window(int id, int x, int y, int w, int h, const char* title, uint32_t c
 
     this->bg_color = color;
     this->is_dragging = false;
+    this->drag_target_x = x;
+    this->drag_target_y = y;
     this->next = nullptr;
     this->buffer = nullptr;
     this->pending_event = {0, 0, 0, 0};
@@ -441,6 +454,7 @@ int WindowManager::perf_cpu_history[20] = {0};
 int WindowManager::perf_current_cpu = 12;
 int WindowManager::frame_counter = 0;
 float WindowManager::ui_scale = 1.25f;
+float WindowManager::ui_scale_inv = 0.8f;
 bool WindowManager::dark_mode = false;
 int WindowManager::wallpaper_theme_id = 0;
 int WindowManager::current_theme = 0;
@@ -922,18 +936,27 @@ void WindowManager::draw_finder_content(Window* win) {
             draw_vector_icon(it.name, ix + 12, iy, 40, it.type == fs::NodeType::DIRECTORY, is_term, is_item_selected);
             
             if (is_item_selected && is_renaming_item) {
-                drivers::Framebuffer::draw_rounded_rect_alpha(ix - 10, iy + 42, 84, 20, 4, C_WHITE, 255);
+                // Outer blue border (1px border simulation)
                 drivers::Framebuffer::draw_rounded_rect_alpha(ix - 10, iy + 42, 84, 20, 4, 0x000F52BA, 255);
+                // Inner white background
+                drivers::Framebuffer::draw_rounded_rect_alpha(ix - 9, iy + 43, 82, 18, 3, C_WHITE, 255);
                 
-                char rename_disp[64];
-                int r_l = 0;
-                while (it.name[r_l] && r_l < 60) { rename_disp[r_l] = it.name[r_l]; r_l++; }
-                if ((frame_counter / 20) % 2 == 0) { rename_disp[r_l++] = '|'; }
-                rename_disp[r_l] = '\0';
-                
-                int label_w = get_string_width(rename_disp, 12.0f);
+                int label_w = get_string_width(it.name, 12.0f);
                 int label_x = ix + (64 - label_w) / 2;
-                draw_string(rename_disp, label_x, iy + 46, C_TEXT, 12.0f);
+                draw_string(it.name, label_x, iy + 46, C_TEXT, 12.0f);
+
+                // Draw vertical text cursor
+                bool show_cursor = ((frame_counter / 20) % 2 == 0);
+                if (show_cursor) {
+                    char sub[128];
+                    int j = 0;
+                    for (; j < rename_cursor_idx && it.name[j]; j++) {
+                        sub[j] = it.name[j];
+                    }
+                    sub[j] = '\0';
+                    int offset_x = get_string_width(sub, 12.0f);
+                    drivers::Framebuffer::draw_rect_alpha(label_x + offset_x, iy + 46, 1, 12, C_TEXT, 255);
+                }
             } else {
                 int label_w = get_string_width(it.name, 13.0f);
                 int label_x = ix + (64 - label_w) / 2;
@@ -992,8 +1015,30 @@ void WindowManager::draw_finder_content(Window* win) {
             bool is_term = str_equal(it.name, "Terminal") || str_equal(it.name, "Terminal.app");
             draw_vector_icon(it.name, x + 155, iy + 4, 16, it.type == fs::NodeType::DIRECTORY, is_term, is_item_selected);
 
-            uint32_t tc = is_item_selected ? C_WHITE : C_TEXT;
-            draw_string(it.name, x + 180, iy + 5, tc, 13.0f);
+            if (is_item_selected && is_renaming_item) {
+                // Draw white input box in list view
+                drivers::Framebuffer::draw_rounded_rect_alpha(x + 174, iy + 2, 156, row_h - 4, 3, 0x000F52BA, 255);
+                drivers::Framebuffer::draw_rounded_rect_alpha(x + 175, iy + 3, 154, row_h - 6, 2, C_WHITE, 255);
+                
+                // Draw text inside input box
+                draw_string(it.name, x + 180, iy + 5, C_TEXT, 12.0f);
+
+                // Draw vertical text cursor
+                bool show_cursor = ((frame_counter / 20) % 2 == 0);
+                if (show_cursor) {
+                    char sub[128];
+                    int j = 0;
+                    for (; j < rename_cursor_idx && it.name[j]; j++) {
+                        sub[j] = it.name[j];
+                    }
+                    sub[j] = '\0';
+                    int offset_x = get_string_width(sub, 12.0f);
+                    drivers::Framebuffer::draw_rect_alpha(x + 180 + offset_x, iy + 5, 1, 14, C_TEXT, 255);
+                }
+            } else {
+                uint32_t tc = is_item_selected ? C_WHITE : C_TEXT;
+                draw_string(it.name, x + 180, iy + 5, tc, 13.0f);
+            }
 
             const char* type_str = "File";
             if (it.type == fs::NodeType::DIRECTORY) {
@@ -1618,9 +1663,42 @@ void WindowManager::draw_code_editor_content(Window* win) {
 
 void WindowManager::draw_window_client_area(Window* win) {
     if (!win->buffer) return;
-    int w = win->rect.w - 2;
-    int h = win->rect.h - TITLE_BAR_HEIGHT - 12;
-    drivers::Framebuffer::blit_buffer(win->rect.x + 1, win->rect.y + TITLE_BAR_HEIGHT, w, h, win->buffer);
+    int dest_w = win->rect.w - 2;
+    int dest_h = win->rect.h - TITLE_BAR_HEIGHT - 12;
+    int dest_x = win->rect.x + 1;
+    int dest_y = win->rect.y + TITLE_BAR_HEIGHT;
+
+    int src_w = win->orig_rect.w - 2;
+    int src_h = win->orig_rect.h - 42;
+
+    if (dest_w <= 0 || dest_h <= 0 || src_w <= 0 || src_h <= 0) return;
+
+    if (ui_scale == 1.0f || (dest_w == src_w && dest_h == src_h)) {
+        drivers::Framebuffer::blit_buffer(dest_x, dest_y, dest_w, dest_h, win->buffer);
+    } else {
+        // Nearest-neighbor scaling blit to handle UI scaling factor
+        Rect clip = drivers::Framebuffer::get_clip_rect();
+        for (int dy = 0; dy < dest_h; ++dy) {
+            int py = dest_y + dy;
+            if (py < clip.y || py >= clip.y + clip.h) continue;
+
+            int sy = (dy * src_h) / dest_h;
+            if (sy < 0) sy = 0;
+            if (sy >= src_h) sy = src_h - 1;
+
+            for (int dx = 0; dx < dest_w; ++dx) {
+                int px = dest_x + dx;
+                if (px < clip.x || px >= clip.x + clip.w) continue;
+
+                int sx = (dx * src_w) / dest_w;
+                if (sx < 0) sx = 0;
+                if (sx >= src_w) sx = src_w - 1;
+
+                uint32_t color = win->buffer[sy * src_w + sx];
+                drivers::Framebuffer::draw_pixel(px, py, color);
+            }
+        }
+    }
 }
 
 void Window::draw(bool is_active) {
@@ -1908,8 +1986,8 @@ Window* WindowManager::create_window(int x, int y, int w, int h, const char* tit
         return nullptr;
     }
 
-    win->orig_rect.x = (int)(physical_x / ui_scale);
-    win->orig_rect.y = (int)(physical_y / ui_scale);
+    win->orig_rect.x = (int)(physical_x * ui_scale_inv);
+    win->orig_rect.y = (int)(physical_y * ui_scale_inv);
     win->orig_rect.w = w;
     win->orig_rect.h = h;
 
@@ -2317,9 +2395,38 @@ void WindowManager::draw_desktop_icons() {
 
             draw_vector_icon(it.name, it.x + pad_ic, it.y, size_ic, it.is_directory, it.is_terminal, it.selected);
             
-            int label_w = get_string_width(it.name, 13.0f);
-            int label_x = it.x + (size_bg_w - label_w) / 2;
-            draw_string(it.name, label_x, it.y + (int)(45 * ui_scale), C_WHITE, 13.0f);
+            if (it.selected && is_renaming_item) {
+                // Draw text box
+                int box_w = (int)(84 * ui_scale);
+                int box_h = (int)(20 * ui_scale);
+                int box_x = it.x + (size_bg_w - box_w) / 2;
+                int box_y = it.y + (int)(42 * ui_scale);
+                
+                drivers::Framebuffer::draw_rounded_rect_alpha(box_x, box_y, box_w, box_h, 4, 0x000F52BA, 255);
+                drivers::Framebuffer::draw_rounded_rect_alpha(box_x + 1, box_y + 1, box_w - 2, box_h - 2, 3, C_WHITE, 255);
+
+                // Draw string
+                int label_w = get_string_width(it.name, 12.0f);
+                int label_x = it.x + (size_bg_w - label_w) / 2;
+                draw_string(it.name, label_x, box_y + 4, C_TEXT, 12.0f);
+
+                // Draw vertical text cursor
+                bool show_cursor = ((frame_counter / 20) % 2 == 0);
+                if (show_cursor) {
+                    char sub[128];
+                    int j = 0;
+                    for (; j < rename_cursor_idx && it.name[j]; j++) {
+                        sub[j] = it.name[j];
+                    }
+                    sub[j] = '\0';
+                    int offset_x = get_string_width(sub, 12.0f);
+                    drivers::Framebuffer::draw_rect_alpha(label_x + offset_x, box_y + 4, 1, 12, C_TEXT, 255);
+                }
+            } else {
+                int label_w = get_string_width(it.name, 13.0f);
+                int label_x = it.x + (size_bg_w - label_w) / 2;
+                draw_string(it.name, label_x, it.y + (int)(45 * ui_scale), C_WHITE, 13.0f);
+            }
         }
     }
 }
@@ -2947,8 +3054,7 @@ void WindowManager::execute_menu_action(int action_id) {
             for (int i = 0; i < active_window->finder_item_count; i++) {
                 if (str_equal(active_window->finder_items[i].name, folder_name)) {
                     active_window->selected_item_idx = i;
-                    is_renaming_item = true;
-                    str_copy(rename_original_name, folder_name, sizeof(rename_original_name));
+                    start_renaming(folder_name);
                     break;
                 }
             }
@@ -2996,8 +3102,7 @@ void WindowManager::execute_menu_action(int action_id) {
             for (int i = 0; i < active_window->finder_item_count; i++) {
                 if (str_equal(active_window->finder_items[i].name, file_name)) {
                     active_window->selected_item_idx = i;
-                    is_renaming_item = true;
-                    str_copy(rename_original_name, file_name, sizeof(rename_original_name));
+                    start_renaming(file_name);
                     break;
                 }
             }
@@ -3027,14 +3132,20 @@ void WindowManager::execute_menu_action(int action_id) {
             }
         }
     } else if (action_id == 11) { // Rename
-        is_renaming_item = true;
         if (active_window && active_window->title_is("Finder")) {
             int sel = active_window->selected_item_idx;
             if (sel >= 0 && sel < active_window->finder_item_count) {
-                str_copy(rename_original_name, active_window->finder_items[sel].name, sizeof(rename_original_name));
+                start_renaming(active_window->finder_items[sel].name);
             }
-        } else if (active_window && !active_window->title_is("Finder")) {
+        } else {
             active_window = nullptr;
+            int sel = -1;
+            for (int j = 0; j < desktop_item_count; j++) {
+                if (desktop_items[j].selected) { sel = j; break; }
+            }
+            if (sel != -1) {
+                start_renaming(desktop_items[sel].name);
+            }
         }
     } else if (action_id == 12) { // Delete
         if (active_window && active_window->title_is("Finder")) {
@@ -3223,6 +3334,8 @@ void WindowManager::execute_menu_action(int action_id) {
                 active_window->rect = {0, MENU_BAR_HEIGHT, width, height - TASKBAR_HEIGHT - MENU_BAR_HEIGHT};
                 active_window->is_maximized = true;
             }
+            active_window->drag_target_x = active_window->rect.x;
+            active_window->drag_target_y = active_window->rect.y;
         }
     } else if (action_id == 23) { // Help
         create_window(250, 180, 600, 400, "Safari", C_FINDER);
@@ -3758,6 +3871,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                         clicked->rect = {0, MENU_BAR_HEIGHT, width, height - TASKBAR_HEIGHT - MENU_BAR_HEIGHT};
                         clicked->is_maximized = true;
                     }
+                    clicked->drag_target_x = clicked->rect.x;
+                    clicked->drag_target_y = clicked->rect.y;
                     focus_window(clicked);
                     force_redraw_all();
                 } else if (in_rect(new_x, new_y, wx, wy, clicked->rect.w, TITLE_BAR_HEIGHT)) {
@@ -3772,9 +3887,13 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                         if (clicked->rect.x < 0) clicked->rect.x = 0;
                         if (clicked->rect.x + clicked->rect.w > width) clicked->rect.x = width - clicked->rect.w;
                         if (clicked->rect.y < 0) clicked->rect.y = 0;
+                        clicked->drag_target_x = clicked->rect.x;
+                        clicked->drag_target_y = clicked->rect.y;
                     }
                     drag_offset_x = new_x - clicked->rect.x;
                     drag_offset_y = new_y - clicked->rect.y;
+                    clicked->drag_target_x = clicked->rect.x;
+                    clicked->drag_target_y = clicked->rect.y;
 
                     // Allocate and pre-render window content into private buffer for smooth dragging
                     if (clicked->buffer) {
@@ -4020,8 +4139,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                 for (int i = 0; i < clicked->finder_item_count; i++) {
                                     if (str_equal(clicked->finder_items[i].name, folder_name)) {
                                         clicked->selected_item_idx = i;
-                                        is_renaming_item = true;
-                                        str_copy(rename_original_name, folder_name, sizeof(rename_original_name));
+                                        start_renaming(folder_name);
                                         break;
                                     }
                                 }
@@ -4059,8 +4177,7 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
                                 for (int i = 0; i < clicked->finder_item_count; i++) {
                                     if (str_equal(clicked->finder_items[i].name, file_name)) {
                                         clicked->selected_item_idx = i;
-                                        is_renaming_item = true;
-                                        str_copy(rename_original_name, file_name, sizeof(rename_original_name));
+                                        start_renaming(file_name);
                                         break;
                                     }
                                 }
@@ -4474,7 +4591,6 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
     // 3. Dragging Logic
     if (!state_updated && left_pressed && position_changed) {
         if (active_window && active_window->is_dragging) {
-            Rect old_rect = active_window->rect;
             int next_x = new_x - drag_offset_x;
             int next_y = new_y - drag_offset_y;
 
@@ -4483,17 +4599,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
             if (next_x < -active_window->rect.w + 40) next_x = -active_window->rect.w + 40;
             if (next_x > width - 40) next_x = width - 40;
             
-            if (next_x != old_rect.x || next_y != old_rect.y) {
-                active_window->rect.x = next_x;
-                active_window->rect.y = next_y;
-
-                int shadow = 32;
-                Rect old_damage = expanded_rect(old_rect, shadow);
-                Rect new_damage = expanded_rect(active_window->rect, shadow);
-                dirty.add(old_damage);
-                dirty.add(new_damage);
-                needs_redraw = true;
-            }
+            active_window->drag_target_x = next_x;
+            active_window->drag_target_y = next_y;
         } else if (active_window && is_resizing_window) {
             int next_w = resize_start_w + (new_x - click_start_x);
             int next_h = resize_start_h + (new_y - click_start_y);
@@ -4573,8 +4680,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
     if (!state_updated && left_up) {
         if (active_window && active_window->is_dragging) {
             active_window->is_dragging = false;
-            active_window->orig_rect.x = (int)(active_window->rect.x / ui_scale);
-            active_window->orig_rect.y = (int)(active_window->rect.y / ui_scale);
+            active_window->orig_rect.x = (int)(active_window->rect.x * ui_scale_inv);
+            active_window->orig_rect.y = (int)(active_window->rect.y * ui_scale_inv);
             if (active_window->buffer) {
                 delete[] active_window->buffer;
                 active_window->buffer = nullptr;
@@ -4585,8 +4692,8 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
         }
         if (active_window && is_resizing_window) {
             is_resizing_window = false;
-            active_window->orig_rect.w = (int)(active_window->rect.w / ui_scale);
-            active_window->orig_rect.h = (int)(active_window->rect.h / ui_scale);
+            active_window->orig_rect.w = (int)(active_window->rect.w * ui_scale_inv);
+            active_window->orig_rect.h = (int)(active_window->rect.h * ui_scale_inv);
             force_redraw_all();
             state_updated = true;
             trigger_host_persist();
@@ -4827,6 +4934,38 @@ void WindowManager::handle_mouse_move(int new_x, int new_y, bool left_pressed, b
 void WindowManager::tick() {
     audio_tick();
     frame_counter++;
+
+    // Smooth window dragging interpolation
+    for (Window* w = window_list_head; w; w = w->next) {
+        if (w->rect.x != w->drag_target_x || w->rect.y != w->drag_target_y) {
+            Rect old_rect = w->rect;
+            int dx = w->drag_target_x - w->rect.x;
+            int dy = w->drag_target_y - w->rect.y;
+
+            int step_x = 0;
+            int step_y = 0;
+
+            // Divide by 3 for a beautiful, physics-like deceleration
+            if (dx > 0) step_x = (dx + 2) / 3;
+            else if (dx < 0) step_x = (dx - 2) / 3;
+
+            if (dy > 0) step_y = (dy + 2) / 3;
+            else if (dy < 0) step_y = (dy - 2) / 3;
+
+            w->rect.x += step_x;
+            w->rect.y += step_y;
+
+            w->orig_rect.x = (int)(w->rect.x * ui_scale_inv);
+            w->orig_rect.y = (int)(w->rect.y * ui_scale_inv);
+
+            int shadow = 32;
+            Rect old_damage = expanded_rect(old_rect, shadow);
+            Rect new_damage = expanded_rect(w->rect, shadow);
+            enqueue_pending_dirty(old_damage);
+            enqueue_pending_dirty(new_damage);
+        }
+    }
+
     if (frame_counter % 60 == 0) {
         for (int i = 0; i < 19; i++) {
             perf_cpu_history[i] = perf_cpu_history[i + 1];
@@ -4984,9 +5123,20 @@ void WindowManager::handle_key_press(char c) {
                 int len = 0;
                 while (it.name[len]) len++;
                 
-                if (c == '\b') {
-                    if (len > 0) {
-                        it.name[len - 1] = '\0';
+                // Keep cursor within valid range
+                if (rename_cursor_idx < 0) rename_cursor_idx = 0;
+                if (rename_cursor_idx > len) rename_cursor_idx = len;
+
+                if (c == (char)0x80) { // Left arrow
+                    if (rename_cursor_idx > 0) rename_cursor_idx--;
+                } else if (c == (char)0x81) { // Right arrow
+                    if (rename_cursor_idx < len) rename_cursor_idx++;
+                } else if (c == '\b') {
+                    if (rename_cursor_idx > 0) {
+                        for (int idx = rename_cursor_idx - 1; idx < len; idx++) {
+                            it.name[idx] = it.name[idx + 1];
+                        }
+                        rename_cursor_idx--;
                     }
                 } else if (c == '\n') {
                     is_renaming_item = false;
@@ -4995,8 +5145,11 @@ void WindowManager::handle_key_press(char c) {
                     rename_item(active_dir, rename_original_name, it.name);
                     active_window->finder_needs_reload = true;
                 } else if (c >= 32 && c <= 126 && len < 28) {
-                    it.name[len] = c;
-                    it.name[len + 1] = '\0';
+                    for (int idx = len; idx >= rename_cursor_idx; idx--) {
+                        it.name[idx + 1] = it.name[idx];
+                    }
+                    it.name[rename_cursor_idx] = c;
+                    rename_cursor_idx++;
                 }
             }
             Rect dirty = {
@@ -5044,11 +5197,55 @@ void WindowManager::handle_key_press(char c) {
             };
             redraw_dirty_rect(dirty);
         }
+    } else if (is_renaming_item) {
+        int sel = -1;
+        for (int i = 0; i < desktop_item_count; i++) {
+            if (desktop_items[i].selected) {
+                sel = i;
+                break;
+            }
+        }
+        if (sel >= 0 && sel < desktop_item_count) {
+            DiskItem& it = desktop_items[sel];
+            int len = 0;
+            while (it.name[len]) len++;
+            
+            // Keep cursor within valid range
+            if (rename_cursor_idx < 0) rename_cursor_idx = 0;
+            if (rename_cursor_idx > len) rename_cursor_idx = len;
+
+            if (c == (char)0x80) { // Left arrow
+                if (rename_cursor_idx > 0) rename_cursor_idx--;
+            } else if (c == (char)0x81) { // Right arrow
+                if (rename_cursor_idx < len) rename_cursor_idx++;
+            } else if (c == '\b') {
+                if (rename_cursor_idx > 0) {
+                    for (int idx = rename_cursor_idx - 1; idx < len; idx++) {
+                        it.name[idx] = it.name[idx + 1];
+                    }
+                    rename_cursor_idx--;
+                }
+            } else if (c == '\n') {
+                is_renaming_item = false;
+                rename_item(it.path, rename_original_name, it.name);
+                for (Window* w = window_list_head; w; w = w->next) {
+                    if (w->title_is("Finder")) w->finder_needs_reload = true;
+                }
+            } else if (c >= 32 && c <= 126 && len < 28) {
+                for (int idx = len; idx >= rename_cursor_idx; idx--) {
+                    it.name[idx + 1] = it.name[idx];
+                }
+                it.name[rename_cursor_idx] = c;
+                rename_cursor_idx++;
+            }
+        }
+        force_redraw_all();
     }
 }
 
 void WindowManager::set_ui_scale(float scale) {
     ui_scale = scale;
+    ui_scale_inv = 1.0f / scale;
     
     // Scale layout parameters
     MENU_BAR_HEIGHT   = (int)(28 * scale);
@@ -5075,6 +5272,8 @@ void WindowManager::set_ui_scale(float scale) {
         if (w->rect.x + w->rect.w > width) w->rect.x = width - w->rect.w;
         if (w->rect.y < 0) w->rect.y = 0;
         if (w->rect.y + w->rect.h > height - TASKBAR_HEIGHT) w->rect.y = height - TASKBAR_HEIGHT - w->rect.h;
+        w->drag_target_x = w->rect.x;
+        w->drag_target_y = w->rect.y;
     }
     force_redraw_all();
 }

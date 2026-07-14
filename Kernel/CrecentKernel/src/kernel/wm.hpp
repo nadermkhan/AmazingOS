@@ -30,6 +30,8 @@ public:
     char title[64];
     uint32_t bg_color;
     bool is_dragging;
+    int drag_target_x;
+    int drag_target_y;
     Window* next;
     uint32_t* buffer;
     Event pending_event;
@@ -198,6 +200,7 @@ public:
 
     // UI Scaling and Customization globals
     static float ui_scale;
+    static float ui_scale_inv;
     static bool dark_mode;
     static int wallpaper_theme_id;
     static int current_theme;
