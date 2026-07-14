@@ -1,0 +1,1 @@
+Crecent OS Kernel System Log initialized.

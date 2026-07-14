@@ -1,0 +1,1 @@
+Hierarchical directories in TarFS are fully working.
